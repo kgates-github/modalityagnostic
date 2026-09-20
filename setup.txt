@@ -1,0 +1,23 @@
+
+
+cd ~/path/to/your/project
+python3 -m venv venv
+source venv/bin/activate
+
+--> deactivate
+
+pip install mlx mlx-lm
+python3 -c "import mlx.core as mx; print(mx.array([1,2,3]) * 2)"
+
+# Download QWen
+mlx_lm.generate --model mlx-community/Qwen2.5-7B-Instruct-4bit --prompt "Hello, who are you?"
+~/.cache/huggingface/hub/
+
+# Shows everything cached
+huggingface-cli scan-cache
+
+# Delete cache
+huggingface-cli delete-cache
+
+# install transformers
+pip install sentence-transformers
