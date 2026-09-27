@@ -1,0 +1,16 @@
+[package]
+name = "modalityagnostic"
+version = "0.1.0"
+description = "modalityagnostic desktop app"
+edition = "2021"
+
+[lib]
+name = "modalityagnostic_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+libc = "0.2"

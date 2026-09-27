@@ -1,0 +1,151 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  color: #1c1c1e;
+  background: #fff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color: #222;
+    background: #EFEAE3;
+  }
+}
+
+body {
+  margin: 0;
+}
+
+button {
+  height:30px;
+  margin-right: 4px;
+}
+
+.app {
+  min-width: 0px;
+  height: 100vh;
+  box-sizing: border-box;
+  margin: 0 auto;
+  padding: 2rem 1.5rem;
+}
+
+section {
+  margin-top: 1.5rem;
+}
+
+input {
+  width: 60%;
+  margin-right: 0.5rem;
+  padding: 0.4rem 0.6rem;
+}
+
+button {
+  padding: 0.4rem 0.9rem;
+}
+
+pre {
+  min-height: 3rem;
+  padding: 0.75rem;
+  border-radius: 6px;
+  background: rgba(127, 127, 127, 0.15);
+  white-space: pre-wrap;
+}
+
+.status {
+  font-weight: 600;
+}
+.status.online {
+  color: #28a745;
+}
+.status.offline {
+  color: #d73a49;
+}
+.status.connecting {
+  color: #b08800;
+}
+
+@keyframes stub-pulse {
+  0%,
+  100% {
+    opacity: 0.7;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+
+.circle-stub {
+  animation: stub-pulse 500ms ease-in-out infinite;
+}
+
+.circle-frame {
+  position: absolute;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+.circle-frame-stub {
+  border: 3px dashed #999;
+}
+.circle-frame-selected {
+  border: 3px solid #3b7dd8;
+}
+
+.circle-handle {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+}
+.circle-handle-stub {
+  background: #fff;
+  border: 3px solid #999;
+}
+.circle-handle-selected {
+  background: #fff;
+  border: 3px solid #2f66c2;
+}
+.handle-tl {
+  top: -8px;
+  left: -8px;
+}
+.handle-tr {
+  top: -8px;
+  right: -8px;
+}
+.handle-bl {
+  bottom: -8px;
+  left: -8px;
+}
+.handle-br {
+  bottom: -8px;
+  right: -8px;
+}
+
+.circle-flags {
+  position: absolute;
+  top: 0;
+  left: calc(100% + 24px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: max-content;
+  max-width: 280px;
+}
+
+.circle-flag {
+  min-height: 24px;
+  padding: 4px 8px;
+  display: flex;
+  align-items: center;
+  border-radius: 4px;
+  background: #F8F4EF;
+  color: #000000;
+  font-size: 0.5rem;
+  font-weight: 400;
+  line-height: 1.8;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  /* white-space: nowrap; */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-sizing: border-box;
+}

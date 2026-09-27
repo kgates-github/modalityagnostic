@@ -1,0 +1,13 @@
+# Sidecar runtime
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+
+# ML (used by upcoming LLM / intent-classification code)
+mlx==0.32.2
+mlx-lm==0.31.3
+sentence-transformers==6.1.0
+torch==2.14.0
+transformers==5.17.0
+
+# Packaging (build_sidecar.sh)
+pyinstaller==6.22.3
