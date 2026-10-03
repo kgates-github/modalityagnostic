@@ -6,8 +6,10 @@ import SelectionRect from "./components/SelectionRect";
 type Status = "connecting" | "online" | "offline";
 type CircleSpec = CircleProps & { id: number };
 type Point = { x: number; y: number };
+type Placement = { x: number; y: number; width: number; height: number };
 
 const DRAG_THRESHOLD_PX = 4;
+const MIN_BOX_DIMENSION_PX = 20;
 
 export default function App() {
   const [status, setStatus] = useState<Status>("connecting");
@@ -22,6 +24,7 @@ export default function App() {
   const [focusedId, setFocusedId] = useState<number | null>(null);
   const [dragStart, setDragStart] = useState<Point | null>(null);
   const [dragCurrent, setDragCurrent] = useState<Point | null>(null);
+  const [optionHeld, setOptionHeld] = useState(false);
   const cancelRef = useRef<(() => void) | null>(null);
   const pendingCircleIdRef = useRef<number | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
@@ -55,6 +58,11 @@ export default function App() {
       dragCurrentRef.current = point;
       setDragCurrent(point);
     }
+    // Live indicator only — the actual create-on-release check below reads
+    // e.altKey off the mouseup event directly, independent of this state.
+    function handleKeyChange(e: KeyboardEvent) {
+      if (e.key === "Alt") setOptionHeld(e.altKey);
+    }
     function handleUp(e: MouseEvent) {
       // Read from the ref, not the `dragCurrent` state — this closure was
       // created once when the drag started and won't see later setDragCurrent
@@ -64,17 +72,28 @@ export default function App() {
         current != null &&
         (Math.abs(current.x - start.x) > DRAG_THRESHOLD_PX ||
           Math.abs(current.y - start.y) > DRAG_THRESHOLD_PX);
-      if (e.altKey && dragged && status === "online" && !streaming) {
-        stream();
+      if (e.altKey && dragged && current != null && status === "online" && !streaming) {
+        const placement: Placement = {
+          x: Math.min(start.x, current.x),
+          y: Math.min(start.y, current.y),
+          width: Math.max(MIN_BOX_DIMENSION_PX, Math.abs(current.x - start.x)),
+          height: Math.max(MIN_BOX_DIMENSION_PX, Math.abs(current.y - start.y)),
+        };
+        stream(placement);
       }
       setDragStart(null);
       setDragCurrent(null);
+      setOptionHeld(false);
     }
     window.addEventListener("mousemove", handleMove);
     window.addEventListener("mouseup", handleUp);
+    window.addEventListener("keydown", handleKeyChange);
+    window.addEventListener("keyup", handleKeyChange);
     return () => {
       window.removeEventListener("mousemove", handleMove);
       window.removeEventListener("mouseup", handleUp);
+      window.removeEventListener("keydown", handleKeyChange);
+      window.removeEventListener("keyup", handleKeyChange);
     };
   }, [dragStart]);
 
@@ -85,6 +104,7 @@ export default function App() {
     const point = { x: e.clientX - rect.left, y: e.clientY - rect.top };
     setDragStart(point);
     setDragCurrent(point);
+    setOptionHeld(e.altKey); // in case Option was already down before the drag started
   }
 
   const dragRect =
@@ -112,7 +132,7 @@ export default function App() {
     setCircles([]);
   }
 
-  function stream() {
+  function stream(placement?: Placement) {
     cancelRef.current?.();
     setOutput("");
     setCommandStatus("");
@@ -125,7 +145,20 @@ export default function App() {
         if (result === "create_circle") {
           const id = Date.now();
           pendingCircleIdRef.current = id;
-          setCircles((cs) => [...cs, { id, inputText: prompt }]);
+          setCircles((cs) => [
+            ...cs,
+            {
+              id,
+              inputText: prompt,
+              ...(placement
+                ? {
+                    position: { x: placement.x, y: placement.y },
+                    width: placement.width,
+                    height: placement.height,
+                  }
+                : {}),
+            },
+          ]);
           setFocusedId(id); // new stub takes focus; every other box disappears
         } else {
           pendingCircleIdRef.current = null;
@@ -151,7 +184,12 @@ export default function App() {
                 ? {
                     ...c,
                     color: a.arguments.color ?? c.color,
-                    size: a.arguments.size ? Number(a.arguments.size) : c.size,
+                    // A box-drawn circle (has `position`) keeps the dimensions
+                    // it was drawn with, permanently — the box wins over
+                    // whatever size the model comes back with.
+                    ...(c.position === undefined && a.arguments.size
+                      ? { size: Number(a.arguments.size) }
+                      : {}),
                   }
                 : c
             )
@@ -179,6 +217,9 @@ export default function App() {
           <Circle
             key={c.id}
             size={c.size}
+            width={c.width}
+            height={c.height}
+            position={c.position}
             color={c.color}
             opacity={c.opacity}
             focused={c.id === focusedId}
@@ -186,7 +227,7 @@ export default function App() {
             streamText={c.streamText}
           />
         ))}
-        {dragRect && <SelectionRect {...dragRect} />}
+        {dragRect && <SelectionRect {...dragRect} highlighted={optionHeld} />}
       </div>
       {/*<section>
         <h2>HTTP</h2>
@@ -198,7 +239,7 @@ export default function App() {
 
       <section>
         <input value={prompt} onChange={(e) => setPrompt(e.target.value)} />
-        <button onClick={stream} disabled={status !== "online" || streaming}>
+        <button onClick={() => stream()} disabled={status !== "online" || streaming}>
           Run command
         </button>
         <button onClick={clearCircles}>Clear</button>

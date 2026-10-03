@@ -31,11 +31,14 @@ export const CORNERS = ["tl", "tr", "bl", "br"] as const;
  */
 export default function Circle({
   size = 150,
+  width,
+  height,
   color,
   opacity = 0.8,
   focused = false,
   inputText,
   streamText,
+  position,
 }: CircleProps) {
   const [offsetX] = useState(randomJitter);
   const [offsetY] = useState(randomJitter);
@@ -45,8 +48,12 @@ export default function Circle({
   // currently-focused circle, dashed while it's a stub or solid once resolved.
   const isStub = color === undefined;
   const frameVariant = !focused ? null : isStub ? "stub" : "selected";
-  const top = `calc(50% - ${size / 2}px + ${offsetY}px)`;
-  const left = `calc(50% - ${size / 2}px + ${offsetX}px)`;
+  const w = width ?? size;
+  const h = height ?? size;
+  // border-radius: 50% on a non-square box renders an ellipse filling it exactly,
+  // so a box-drawn rectangle (w !== h) doesn't need any different shape handling.
+  const top = position ? `${position.y}px` : `calc(50% - ${h / 2}px + ${offsetY}px)`;
+  const left = position ? `${position.x}px` : `calc(50% - ${w / 2}px + ${offsetX}px)`;
 
   return (
     <>
@@ -56,15 +63,15 @@ export default function Circle({
           position: "absolute",
           top,
           left,
-          width: size,
-          height: size,
+          width: w,
+          height: h,
           borderRadius: "50%",
           backgroundColor: color ?? "#ccc",
           opacity: isStub ? undefined : opacity,
         }}
       />
       {frameVariant && (
-        <div className={`circle-frame circle-frame-${frameVariant}`} style={{ top, left, width: size, height: size }}>
+        <div className={`circle-frame circle-frame-${frameVariant}`} style={{ top, left, width: w, height: h }}>
           {CORNERS.map((corner) => (
             <span key={corner} className={`circle-handle circle-handle-${frameVariant} handle-${corner}`} />
           ))}
@@ -73,7 +80,7 @@ export default function Circle({
               <div className="circle-flag">{inputText}</div>
               {(streamText !== undefined || !isStub) && (
                 <div className="circle-flag">
-                  {isStub ? streamText : `Color: ${color}, Size: ${size}px`}
+                  {isStub ? streamText : `Color: ${color}, Size: ${w === h ? `${w}px` : `${w}x${h}px`}`}
                 </div>
               )}
             </div>

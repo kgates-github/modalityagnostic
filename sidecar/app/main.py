@@ -9,16 +9,13 @@ from mlx_lm import load, stream_generate
 from sentence_transformers import SentenceTransformer, util
 
 from .tools import tools
+from .commands import commands
 
 # --- Model setup (loaded once, at sidecar startup) --------------------------
 
 qwen_model, qwen_tokenizer = load("mlx-community/Qwen3.5-9B-4bit")
 embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-commands = {
-    "create_circle": ["create a circle", "I want a circle", "add a circle", "add circle", "create circle"],
-    "move_circle": ["move the circle", "shift the circle", "drag the circle"],
-}
 command_embeddings = {c: embed_model.encode(examples) for c, examples in commands.items()}
 
 THRESHOLD = 0.6
@@ -59,7 +56,7 @@ def stream_call_qwen_function(user_input):
         }
     ]
     prompt = qwen_tokenizer.apply_chat_template(
-        messages, tools=tools, add_generation_prompt=True, enable_thinking=True
+        messages, tools=tools, add_generation_prompt=True, enable_thinking=False
     )
     for chunk in stream_generate(qwen_model, qwen_tokenizer, prompt=prompt):
         yield chunk.text

@@ -88,6 +88,9 @@ pre {
 .circle-frame-selected {
   border: 3px solid #3b7dd8;
 }
+.circle-frame-option {
+  border: 3px dashed #74C670;
+}
 
 .circle-handle {
   position: absolute;
@@ -102,6 +105,10 @@ pre {
 .circle-handle-selected {
   background: #fff;
   border: 3px solid #2f66c2;
+}
+.circle-handle-option {
+  background: #fff;
+  border: 3px solid #22bf1a;
 }
 .handle-tl {
   top: -8px;
