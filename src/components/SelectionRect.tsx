@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { CORNERS } from "./Circle";
 
 export type SelectionRectProps = {
@@ -5,20 +6,27 @@ export type SelectionRectProps = {
   y: number;
   width: number;
   height: number;
-  /** True while Option is held during the drag — turns the box green as a live
-   * indicator that releasing now will create a circle. Purely a drag-time cue;
-   * has no bearing on the resulting circle's own frame styling. */
-  highlighted?: boolean;
+  /** "stub" (dashed gray, default) while dragging; "selected" (solid blue) for
+   * the blank-dialog placeholder anchoring where the eventual circle will land. */
+  variant?: "stub" | "selected";
+  /** Shown next to the box, same flag styling Circle uses. Undefined = no flag. */
+  flagText?: string;
 };
 
-/** Marquee-select drag rectangle. Reuses the circle stub's dashed frame/handle look. */
-export default function SelectionRect({ x, y, width, height, highlighted = false }: SelectionRectProps) {
-  const variant = highlighted ? "option" : "stub";
+/** A standalone box — marquee drag rectangle, or a placeholder anchor. Reuses Circle's frame/handle look. */
+function SelectionRect({ x, y, width, height, variant = "stub", flagText }: SelectionRectProps) {
   return (
     <div className={`circle-frame circle-frame-${variant}`} style={{ top: y, left: x, width, height }}>
       {CORNERS.map((corner) => (
         <span key={corner} className={`circle-handle circle-handle-${variant} handle-${corner}`} />
       ))}
+      {flagText !== undefined && (
+        <div className="circle-flags">
+          <div className="circle-flag">{flagText}</div>
+        </div>
+      )}
     </div>
   );
 }
+
+export default memo(SelectionRect);

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 
 export type CircleProps = {
   size?: number;
@@ -29,7 +29,15 @@ export const CORNERS = ["tl", "tr", "bl", "br"] as const;
  * is picked once per mounted circle, not re-rolled on re-render.
  * Parent needs `position: relative`.
  */
-export default function Circle({
+/**
+ * Memoized: during a live drag, the tracked circle's position/width/height
+ * update on every animation frame via setCircles, which re-creates the whole
+ * circles array — without memo, every OTHER circle on the canvas would
+ * needlessly re-render too on each of those updates. Unchanged circles keep
+ * the same object reference from the immutable .map() update in App.tsx, so
+ * React's default shallow prop comparison correctly skips them.
+ */
+function Circle({
   size = 150,
   width,
   height,
@@ -37,7 +45,6 @@ export default function Circle({
   opacity = 0.8,
   focused = false,
   inputText,
-  streamText,
   position,
 }: CircleProps) {
   const [offsetX] = useState(randomJitter);
@@ -78,9 +85,9 @@ export default function Circle({
           {inputText !== undefined && (
             <div className="circle-flags">
               <div className="circle-flag">{inputText}</div>
-              {(streamText !== undefined || !isStub) && (
+              {!isStub && (
                 <div className="circle-flag">
-                  {isStub ? streamText : `Color: ${color}, Size: ${w === h ? `${w}px` : `${w}x${h}px`}`}
+                  {`Color: ${color}, Size: ${w === h ? `${w}px` : `${w}x${h}px`}`}
                 </div>
               )}
             </div>
@@ -90,3 +97,5 @@ export default function Circle({
     </>
   );
 }
+
+export default memo(Circle);

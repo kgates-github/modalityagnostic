@@ -88,9 +88,6 @@ pre {
 .circle-frame-selected {
   border: 3px solid #3b7dd8;
 }
-.circle-frame-option {
-  border: 3px dashed #74C670;
-}
 
 .circle-handle {
   position: absolute;
@@ -105,10 +102,6 @@ pre {
 .circle-handle-selected {
   background: #fff;
   border: 3px solid #2f66c2;
-}
-.circle-handle-option {
-  background: #fff;
-  border: 3px solid #22bf1a;
 }
 .handle-tl {
   top: -8px;
@@ -155,4 +148,59 @@ pre {
   overflow: hidden;
   text-overflow: ellipsis;
   box-sizing: border-box;
+}
+
+.dialog {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  width: 360px;
+  background: #efeae3;
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  z-index: 1000;
+}
+
+.dialog-textarea {
+  resize: none;
+  min-height: 60px;
+  padding: 12px 14px;
+  border: 2px solid #3b7dd8;
+  border-radius: 8px;
+  background: #f8f4ef;
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  color: #000;
+}
+
+.dialog-stream {
+  margin-top: 12px;
+  font-size: 0.75rem;
+  color: #555;
+  white-space: pre-wrap;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.dialog-actions {
+  margin-top: auto;
+  padding-top: 16px;
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+}
+
+.dialog-cancel {
+  background: #efeae3;
+  border: 1px solid #999;
+}
+
+.dialog-generate {
+  background: #9fb8dd;
+  border: none;
+  color: #fff;
+  font-weight: 600;
 }
