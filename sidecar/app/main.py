@@ -10,15 +10,39 @@ from sentence_transformers import SentenceTransformer, util
 
 from .tools import tools
 from .commands import commands
+from .prompt_cache import PrimedPromptCache
 
 # --- Model setup (loaded once, at sidecar startup) --------------------------
 
-qwen_model, qwen_tokenizer = load("mlx-community/Qwen3.5-9B-4bit")
+qwen_model, qwen_tokenizer = load("mlx-community/Qwen3.5-4B-4bit")
 embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 command_embeddings = {c: embed_model.encode(examples) for c, examples in commands.items()}
 
 THRESHOLD = 0.6
+
+
+def _build_shape_call_tokens(user_input):
+    messages = [
+        {
+            "role": "user",
+            "content": "INSTRUCTIONS: Keep responses very concise and short. Here is the user input: "
+            + user_input,
+        }
+    ]
+    return qwen_tokenizer.apply_chat_template(
+        messages, tools=tools, add_generation_prompt=True, enable_thinking=False
+    )
+
+
+# Tools schema + instructions are identical on every create_shape call, only
+# the user's own words differ — prime a cache over that shared prefix once,
+# here at startup, instead of reprocessing it on every request.
+shape_prompt_cache = PrimedPromptCache(
+    qwen_model,
+    _build_shape_call_tokens,
+    reference_inputs=("Create a blue circle", "Make a big red square"),
+)
 
 
 def classify(user_input):
@@ -48,17 +72,9 @@ def escalate_to_frontier(user_input):
 
 def stream_call_qwen_function(user_input):
     """Generator: yields each raw text chunk from Qwen's function-calling pass."""
-    messages = [
-        {
-            "role": "user",
-            "content": "INSTRUCTIONS: Keep responses very concise and short. Here is the user input: "
-            + user_input,
-        }
-    ]
-    prompt = qwen_tokenizer.apply_chat_template(
-        messages, tools=tools, add_generation_prompt=True, enable_thinking=False
-    )
-    for chunk in stream_generate(qwen_model, qwen_tokenizer, prompt=prompt):
+    full_tokens = _build_shape_call_tokens(user_input)
+    cache, remaining_tokens = shape_prompt_cache.prepare(full_tokens)
+    for chunk in stream_generate(qwen_model, qwen_tokenizer, prompt=remaining_tokens, prompt_cache=cache):
         yield chunk.text
 
 
@@ -132,6 +148,17 @@ app.add_middleware(
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/classify")
+async def classify_endpoint(text: str = ""):
+    """Cheap, synchronous classify-only check — used for the live shape-type
+    guess while editing text (e.g. the dialog textarea), separate from the
+    full /ws/command pipeline which also runs the much slower Qwen pass."""
+    if not text.strip():
+        return {"result": None, "score": 0.0}
+    result, score = classify(text)
+    return {"result": result, "score": float(score)}
 
 
 @app.websocket("/ws/command")

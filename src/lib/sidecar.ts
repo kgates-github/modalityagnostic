@@ -9,6 +9,16 @@ export async function health(signal?: AbortSignal): Promise<{ status: string }> 
   return res.json();
 }
 
+/** Cheap classify-only check (no Qwen pass) — used for the live shape-type guess while editing text. */
+export async function classify(
+  text: string,
+  signal?: AbortSignal
+): Promise<{ result: string | null; score: number }> {
+  const res = await fetch(`${HTTP_BASE}/classify?text=${encodeURIComponent(text)}`, { signal });
+  if (!res.ok) throw new Error(`classify failed: HTTP ${res.status}`);
+  return res.json();
+}
+
 /** Poll /health until the sidecar answers (it takes a moment to start; later, to load models). */
 export async function waitForSidecar(opts: {
   signal?: AbortSignal;

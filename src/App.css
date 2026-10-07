@@ -73,33 +73,33 @@ pre {
   }
 }
 
-.circle-stub {
+.shape-stub {
   animation: stub-pulse 500ms ease-in-out infinite;
 }
 
-.circle-frame {
+.shape-frame {
   position: absolute;
   box-sizing: border-box;
   pointer-events: none;
 }
-.circle-frame-stub {
+.shape-frame-stub {
   border: 3px dashed #999;
 }
-.circle-frame-selected {
+.shape-frame-selected {
   border: 3px solid #3b7dd8;
 }
 
-.circle-handle {
+.shape-handle {
   position: absolute;
   width: 16px;
   height: 16px;
   box-sizing: border-box;
 }
-.circle-handle-stub {
+.shape-handle-stub {
   background: #fff;
   border: 3px solid #999;
 }
-.circle-handle-selected {
+.shape-handle-selected {
   background: #fff;
   border: 3px solid #2f66c2;
 }
@@ -120,7 +120,7 @@ pre {
   right: -8px;
 }
 
-.circle-flags {
+.shape-flags {
   position: absolute;
   top: 0;
   left: calc(100% + 24px);
@@ -131,7 +131,7 @@ pre {
   max-width: 280px;
 }
 
-.circle-flag {
+.shape-flag {
   min-height: 24px;
   padding: 4px 8px;
   display: flex;
