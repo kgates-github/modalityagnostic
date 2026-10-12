@@ -12,6 +12,7 @@
     "tauri:build": "npm run build:sidecar && tauri build --config src-tauri/tauri.release.conf.json"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.12.3",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },

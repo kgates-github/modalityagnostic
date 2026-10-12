@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 import time
+from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,37 +13,97 @@ from .tools import tools
 from .commands import commands
 from .prompt_cache import PrimedPromptCache
 
+# --- Call log: one file per shape, each line one call in order --------------
+# logs/shapes/<shape_id>.jsonl is that shape's whole pipeline path, start to
+# finish -- no grouping needed to read it, just open the file. Calls with no
+# shape yet (the plain prompt-field button, before a shape exists to attach
+# to) land in _unassigned.jsonl instead.
+
+_SHAPES_LOG_DIR = Path(__file__).resolve().parent.parent / "logs" / "shapes"
+_SHAPES_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def log_call(shape_id, **fields):
+    path = _SHAPES_LOG_DIR / f"{shape_id if shape_id is not None else '_unassigned'}.jsonl"
+    with open(path, "a") as f:
+        f.write(json.dumps({"ts": time.time(), "shape_id": shape_id, **fields}) + "\n")
+
+
 # --- Model setup (loaded once, at sidecar startup) --------------------------
 
-qwen_model, qwen_tokenizer = load("mlx-community/Qwen3.5-4B-4bit")
+
+class ShapeModel:
+    """One create_shape-calling model: its own weights, prompt-cache prefix,
+    and instruction text. Two of these exist (see below) — a small, fast one
+    for a shape's first resolution, a bigger, slower-but-more-careful one for
+    refining a shape that already exists (its history is what tells them
+    apart — see ws_command)."""
+
+    def __init__(self, repo, instructions, reference_calls):
+        self.model, self.tokenizer = load(repo)
+        self.instructions = instructions
+        self.cache = PrimedPromptCache(self.model, self.build_tokens, reference_calls=reference_calls)
+
+    def build_tokens(self, user_input, history=None):
+        # `history` (prior {role, content} turns for the shape being edited,
+        # e.g. "Created a pink circle.") comes after the cached prefix, so an
+        # edit like "make it green" resolves against what was already decided.
+        messages = [
+            *(history or []),
+            {"role": "user", "content": f"{self.instructions} Here is the user input: {user_input}"},
+        ]
+        return self.tokenizer.apply_chat_template(
+            messages, tools=tools, add_generation_prompt=True, enable_thinking=False
+        )
+
+    def stream(self, user_input, history=None):
+        """Generator: yields each raw text chunk from this model's function-calling pass."""
+        full_tokens = self.build_tokens(user_input, history)
+        cache, remaining_tokens = self.cache.prepare(full_tokens)
+        for chunk in stream_generate(self.model, self.tokenizer, prompt=remaining_tokens, prompt_cache=cache):
+            yield chunk.text
+
+
+# The 4B model follows "keep it concise" fine on its own. The 0.8B one, left
+# that loose, sometimes just chats back in plain text instead of calling the
+# tool at all (measured: failed 2 of 3 test prompts) -- spelling out that a
+# tool call is mandatory fixed it (5 of 5 after).
+#
+# shape_model_small only ever gets history=None calls (a shape's first
+# resolution -- see ws_command), so its reference calls stay plain, same as
+# before. shape_model only ever gets history-bearing calls (every edit after
+# that) -- its reference calls use two DIFFERENT dummy histories instead, so
+# what's primed is just the true shared prefix (the system/tools block),
+# not accidentally the no-history instruction text too (which a real,
+# history-bearing call would never actually match).
+shape_model = ShapeModel(
+    "mlx-community/Qwen3.5-4B-4bit",
+    "INSTRUCTIONS: Keep responses very concise and short.",
+    reference_calls=[
+        ("make it bigger", [{"role": "user", "content": "create a blue circle"}, {"role": "assistant", "content": "Made a blue circle."}]),
+        ("make it smaller", [{"role": "user", "content": "create a red square"}, {"role": "assistant", "content": "Made a red square."}]),
+    ],
+)
+shape_model_small = ShapeModel(
+    "mlx-community/Qwen3.5-0.8B-MLX-4bit",
+    "INSTRUCTIONS: You must always respond by calling the create_shape function -- "
+    "never reply in plain text, only a <tool_call> block. For color, pass the plain "
+    "color word the user said (e.g. 'yellow', 'orange') -- do not convert it to hex, "
+    # this model's hex conversion is unreliable (measured: wrong 4 of 8 times --
+    # purple/pink both became magenta, yellow/orange both became red); the plain
+    # word is valid CSS on its own and sidesteps the conversion step entirely.
+    "that step isn't needed. Keep it concise.",
+    reference_calls=[("Create a blue circle", None), ("Make a big red square", None)],
+)
+# Kept for ask_qwen/evaluate_outcome below, which aren't on the fast path and
+# always want the bigger model — aliases, not a second load.
+qwen_model, qwen_tokenizer = shape_model.model, shape_model.tokenizer
+
 embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 command_embeddings = {c: embed_model.encode(examples) for c, examples in commands.items()}
 
 THRESHOLD = 0.6
-
-
-def _build_shape_call_tokens(user_input):
-    messages = [
-        {
-            "role": "user",
-            "content": "INSTRUCTIONS: Keep responses very concise and short. Here is the user input: "
-            + user_input,
-        }
-    ]
-    return qwen_tokenizer.apply_chat_template(
-        messages, tools=tools, add_generation_prompt=True, enable_thinking=False
-    )
-
-
-# Tools schema + instructions are identical on every create_shape call, only
-# the user's own words differ — prime a cache over that shared prefix once,
-# here at startup, instead of reprocessing it on every request.
-shape_prompt_cache = PrimedPromptCache(
-    qwen_model,
-    _build_shape_call_tokens,
-    reference_inputs=("Create a blue circle", "Make a big red square"),
-)
 
 
 def classify(user_input):
@@ -70,12 +131,12 @@ def escalate_to_frontier(user_input):
     return None  # stub — wire up real API call later
 
 
-def stream_call_qwen_function(user_input):
-    """Generator: yields each raw text chunk from Qwen's function-calling pass."""
-    full_tokens = _build_shape_call_tokens(user_input)
-    cache, remaining_tokens = shape_prompt_cache.prepare(full_tokens)
-    for chunk in stream_generate(qwen_model, qwen_tokenizer, prompt=remaining_tokens, prompt_cache=cache):
-        yield chunk.text
+def stream_call_qwen_function(user_input, history=None, use_small=False):
+    """Generator: yields each raw text chunk from the function-calling pass.
+    use_small picks the fast 0.8B model (a shape's first resolution, no
+    history yet) over the 4B one (every edit after that)."""
+    model = shape_model_small if use_small else shape_model
+    yield from model.stream(user_input, history)
 
 
 def parse_tool_call(full_response):
@@ -175,6 +236,15 @@ async def ws_command(websocket: WebSocket):
         while True:
             msg = await websocket.receive_json()
             user_input = str(msg.get("prompt", ""))
+            history = msg.get("history") or []
+            # An edit to a shape that already exists (targetId set client-side)
+            # doesn't need the classifier's shape-command gate — we already
+            # know it's shape-editing speech. Short edits like "make it green"
+            # have no shape noun and score low on their own, so without this
+            # they'd wrongly fall into the escalate stub below and never
+            # reach Qwen at all.
+            is_edit = bool(msg.get("is_edit"))
+            shape_id = msg.get("shape_id")
 
             t_start = time.perf_counter()
             result, score = classify(user_input)
@@ -191,19 +261,33 @@ async def ws_command(websocket: WebSocket):
             # this, nothing actually reaches the client until the whole handler finishes.
             await asyncio.sleep(0)
 
-            if result == "escalate_to_frontier":
+            if result == "escalate_to_frontier" and not is_edit:
                 await websocket.send_json({"type": "status", "text": "Escalating to frontier model..."})
                 await asyncio.sleep(0)
                 escalate_to_frontier(user_input)
+                log_call(
+                    shape_id,
+                    prompt=user_input,
+                    is_edit=is_edit,
+                    history_turns=len(history),
+                    classify_result=result,
+                    classify_score=float(score),
+                    model="escalated",
+                    action=None,
+                    seconds=time.perf_counter() - t_start,
+                )
                 await websocket.send_json({"type": "action", "action": None})
                 await websocket.send_json({"type": "done"})
                 continue
 
+            # No history yet = this shape's first resolution -> fast model.
+            # Once it has history (any edit after that) -> the bigger one.
+            use_small = len(history) == 0
             await websocket.send_json({"type": "status", "text": "Working...\n"})
             await asyncio.sleep(0)
 
             full_response = ""
-            for piece in stream_call_qwen_function(user_input):
+            for piece in stream_call_qwen_function(user_input, history, use_small):
                 full_response += piece
                 print(piece, end="", flush=True)
                 await websocket.send_json({"type": "token", "text": piece})
@@ -212,6 +296,17 @@ async def ws_command(websocket: WebSocket):
 
             action = parse_tool_call(full_response)
             total_elapsed = time.perf_counter() - t_start
+            log_call(
+                shape_id,
+                prompt=user_input,
+                is_edit=is_edit,
+                history_turns=len(history),
+                classify_result=result,
+                classify_score=float(score),
+                model="small" if use_small else "big",
+                action=action,
+                seconds=total_elapsed,
+            )
 
             await websocket.send_json({"type": "action", "action": action})
             await websocket.send_json(

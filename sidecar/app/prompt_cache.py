@@ -39,12 +39,18 @@ def clone_cache(cache):
 
 
 class PrimedPromptCache:
-    def __init__(self, model, build_tokens, reference_inputs):
-        """build_tokens(user_input) -> token id list. Must produce the same
-        fixed prefix regardless of user_input for this to help at all —
-        verified here by diffing two differently-worded reference calls."""
-        ref_a = build_tokens(reference_inputs[0])
-        ref_b = build_tokens(reference_inputs[1])
+    def __init__(self, model, build_tokens, reference_calls):
+        """build_tokens(user_input, history=None) -> token id list.
+        `reference_calls` is two (user_input, history) pairs — whatever's
+        identical between their token sequences is what gets primed. Pass two
+        different histories (not none) when every real call this cache will
+        serve carries history, e.g. a shape's 2nd+ edit — the true shared
+        prefix there is just the system/tools block, since history itself
+        varies per shape; diffing two no-history calls instead would
+        (wrongly) bake the no-history instruction text into the prefix too,
+        and then miss on every real request."""
+        ref_a = build_tokens(*reference_calls[0])
+        ref_b = build_tokens(*reference_calls[1])
         self.prefix_tokens = ref_a[: common_prefix_len(ref_a, ref_b)]
 
         self._model = model

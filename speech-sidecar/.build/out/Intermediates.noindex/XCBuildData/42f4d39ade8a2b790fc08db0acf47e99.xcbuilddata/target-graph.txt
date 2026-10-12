@@ -1,0 +1,4 @@
+Target dependency graph (2 targets)
+Target 'AllExcludingTests' in project 'Aggregate'
+➜ Explicit dependency on target 'SpeechSidecar-product' in project 'speech-sidecar'
+Target 'SpeechSidecar-product' in project 'speech-sidecar' (no dependencies)

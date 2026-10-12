@@ -40,6 +40,7 @@ export async function waitForSidecar(opts: {
 }
 
 export type ToolCall = { name: string; arguments: Record<string, string> } | null;
+export type ChatTurn = { role: "user" | "assistant"; content: string };
 
 type CommandHandlers = {
   onStatus: (text: string) => void;
@@ -51,12 +52,24 @@ type CommandHandlers = {
   onError: (err: Error) => void;
 };
 
-/** Send a user command over WebSocket; streams back status/token/action/timing events. Returns a cancel function. */
-export function runCommand(prompt: string, handlers: CommandHandlers): () => void {
+/** Send a user command over WebSocket; streams back status/token/action/timing events. Returns a cancel function.
+ * `history` is this shape's prior turns (see shapeHistoryRef in App.tsx) — lets
+ * "make it green" resolve against a shape Qwen already described earlier.
+ * `isEdit` skips the server's classifier gate for bare edits like "make it
+ * green" (no shape noun — classifies low-confidence on its own otherwise).
+ * `shapeId` tags the server's call log (logs/shapes/<id>.jsonl) — omitted for
+ * the plain prompt-field button, where no shape exists yet to tag it with. */
+export function runCommand(
+  prompt: string,
+  handlers: CommandHandlers,
+  history: ChatTurn[] = [],
+  isEdit = false,
+  shapeId: number | null = null
+): () => void {
   const ws = new WebSocket(`${WS_BASE}/ws/command`);
   let finished = false;
 
-  ws.onopen = () => ws.send(JSON.stringify({ prompt }));
+  ws.onopen = () => ws.send(JSON.stringify({ prompt, history, is_edit: isEdit, shape_id: shapeId }));
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data as string) as {
       type: string;

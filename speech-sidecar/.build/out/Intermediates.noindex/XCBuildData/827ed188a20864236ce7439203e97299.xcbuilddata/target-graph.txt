@@ -1,0 +1,2 @@
+Target dependency graph (1 target)
+Target 'SpeechSidecar-product' in project 'speech-sidecar' (no dependencies)

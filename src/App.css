@@ -63,7 +63,7 @@ pre {
   color: #b08800;
 }
 
-@keyframes stub-pulse {
+@keyframes shimmer-pulse {
   0%,
   100% {
     opacity: 0.7;
@@ -73,19 +73,16 @@ pre {
   }
 }
 
-.shape-stub {
-  animation: stub-pulse 500ms ease-in-out infinite;
+.shimmer {
+  animation: shimmer-pulse 500ms ease-in-out infinite;
 }
 
+/* The one bounding-box look — shown on the focused shape (or the drag
+   marquee/placeholder) until it's deselected. Nothing else to it. */
 .shape-frame {
   position: absolute;
   box-sizing: border-box;
   pointer-events: none;
-}
-.shape-frame-stub {
-  border: 3px dashed #999;
-}
-.shape-frame-selected {
   border: 3px solid #3b7dd8;
 }
 
@@ -94,12 +91,6 @@ pre {
   width: 16px;
   height: 16px;
   box-sizing: border-box;
-}
-.shape-handle-stub {
-  background: #fff;
-  border: 3px solid #999;
-}
-.shape-handle-selected {
   background: #fff;
   border: 3px solid #2f66c2;
 }
@@ -155,31 +146,33 @@ pre {
   display: flex;
   flex-direction: column;
   width: 360px;
-  background: #efeae3;
+  min-height: 180px;
+  background: #121212;
+  color: #ffffff;
   border-radius: 12px;
-  padding: 24px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  padding: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
   z-index: 1000;
 }
 
 .dialog-textarea {
   resize: none;
-  min-height: 60px;
-  padding: 12px 14px;
-  border: 2px solid #3b7dd8;
+  min-height: 50px;
+  padding: 12px 8px;
+  border: 1px solid #555;
   border-radius: 8px;
-  background: #f8f4ef;
+  background: #111;
   font-family: inherit;
   font-size: 0.75rem;
   font-weight: 400;
   letter-spacing: 0.02em;
-  color: #000;
+  color: #ccc;
 }
 
 .dialog-stream {
   margin-top: 12px;
   font-size: 0.75rem;
-  color: #555;
+  color: #ccc;
   white-space: pre-wrap;
   max-height: 120px;
   overflow-y: auto;
@@ -189,18 +182,21 @@ pre {
   margin-top: auto;
   padding-top: 16px;
   display: flex;
-  gap: 12px;
+  gap: 4px;
   justify-content: flex-end;
 }
 
 .dialog-cancel {
-  background: #efeae3;
-  border: 1px solid #999;
+  background: #666;
+  color: #fff;
+  border: none;
+  width:100%;
 }
 
 .dialog-generate {
-  background: #9fb8dd;
+  background: #1c59b4;
   border: none;
   color: #fff;
   font-weight: 600;
+  width:100%;
 }

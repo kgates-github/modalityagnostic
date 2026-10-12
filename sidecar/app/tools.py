@@ -3,17 +3,18 @@ tools = [
         "type": "function",
         "function": {
             "name": "create_shape",
-            "description": "Create a shape (circle or rectangle/square)",
+            "description": "Create a shape (circle, rectangle/square, triangle, or star)",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "type": {
                         "type": "string",
-                        "enum": ["circle", "rectangle"],
+                        "enum": ["circle", "rectangle", "triangle", "star"],
                         "description": (
                             "The shape to create. 'rectangle' also covers squares "
                             "(a square is just a rectangle with equal width/height). "
-                            "Defaults to 'circle' if unclear."
+                            "'triangle' is a simple equilateral-ish triangle. 'star' "
+                            "is a 5-pointed star. Defaults to 'rectangle' (a square) if unclear."
                         ),
                     },
                     "color": {

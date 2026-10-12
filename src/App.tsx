@@ -1,56 +1,25 @@
 import { useEffect, useRef, useState } from "react";
-import { classify, health, runCommand, waitForSidecar, type ToolCall } from "./lib/sidecar";
+import { classify, runCommand, waitForSidecar, type ChatTurn, type ToolCall } from "./lib/sidecar";
+import { onSpeechEvent, startListening, stopListening } from "./lib/speech";
 import Shape, { type ShapeProps } from "./components/Shape";
 import SelectionRect from "./components/SelectionRect";
 import Dialog from "./components/Dialog";
 
 type Status = "connecting" | "online" | "offline";
+type ShapeKind = NonNullable<ShapeProps["type"]>;
 type ShapeSpec = ShapeProps & { id: number };
 type Point = { x: number; y: number };
 type Placement = { x: number; y: number; width: number; height: number };
 type ResolvedAction = { name: string; arguments: Record<string, string> };
+type StreamOpts = {
+  placement?: Placement;
+  targetId?: number;
+  onCreated?: (id: number) => void;
+};
+type QueuedCommand = { queueId: number; text: string; opts?: StreamOpts };
 
 const DRAG_THRESHOLD_PX = 4;
 const MIN_BOX_DIMENSION_PX = 20;
-
-// Natural, conversational phrasings — not the templated classifier examples
-// in commands.py. Used as the actual pipeline input for Option-triggered
-// drags, picked at random each time, instead of whatever's in the main
-// input field. Half circle, half square/rectangle, so testing actually
-// exercises the shape-type guess (and its live flip while editing), not
-// just circles.
-const NATURAL_CREATE_SHAPE_COMMANDS = [
-  "hey, can you throw a circle up there",
-  "I need a square, make it blue",
-  "could you pop a circle on the screen",
-  "let's add a square. make it green",
-  "mind making me a little red square",
-  "go ahead and drop a circle in",
-  "I want a big square, nothing crazy",
-  "can you whip up a circle for me",
-  "just put a square up, any color's fine",
-  "yo, add a circle real fast",
-  "can you make me a purple circle",
-  "I want an orange square, please",
-  "throw a yellow circle up there",
-  "give me a pink square real quick",
-  "let's go with a teal circle",
-  "add a black square to the screen",
-  "I need a white circle, nothing fancy",
-  "could you make a gray square",
-  "can you add a turquoise circle",
-  "how about a magenta square",
-  "can you make a lime green circle",
-  "add a navy blue square to the screen",
-  "make it a maroon circle",
-  "can you do a gold square",
-  "a silver circle would be great",
-  "go with a cyan square this time",
-  "I want a violet circle up top",
-  "give me a brown square",
-  "how about a coral circle",
-  "add an indigo square, thanks",
-];
 
 function computeRect(a: Point, b: Point): Placement {
   return {
@@ -63,15 +32,32 @@ function computeRect(a: Point, b: Point): Placement {
 
 /** classify() returns a commands.py key — map it to a shape type, or null if
  * it's not a shape-creation intent at all (escalate, or anything else). */
-function shapeTypeFromResult(result: string | null): "circle" | "rectangle" | null {
+function shapeTypeFromResult(result: string | null): ShapeKind | null {
   if (result === "create_circle") return "circle";
   if (result === "create_rectangle") return "rectangle";
+  if (result === "create_triangle") return "triangle";
+  if (result === "create_star") return "star";
   return null;
+}
+
+/** Qwen's returned `type` argument -> a shape kind, defaulting to square for
+ * anything unrecognized — same fallback the tool schema itself documents. */
+function shapeKindFromArgument(type: string | undefined): ShapeKind {
+  if (type === "circle" || type === "triangle" || type === "star") return type;
+  return "rectangle";
+}
+
+/** Plain-English record of what Qwen just decided — fed back as history's
+ * assistant turn on the next edit, so "make it green" has "pink circle" to
+ * work from instead of nothing. */
+function describeAction(a: ResolvedAction): string {
+  const type = shapeKindFromArgument(a.arguments.type);
+  const label = a.arguments.color ? `${a.arguments.color} ${type}` : type;
+  return a.arguments.size ? `Made a ${label}, ${a.arguments.size}px.` : `Made a ${label}.`;
 }
 
 export default function App() {
   const [status, setStatus] = useState<Status>("connecting");
-  const [pingResult, setPingResult] = useState<string>("");
   const [prompt, setPrompt] = useState("Create a blue #0088cc circle that is 200px in diameter");
   const [output, setOutput] = useState("");
   const [commandStatus, setCommandStatus] = useState("");
@@ -82,11 +68,13 @@ export default function App() {
   const [focusedId, setFocusedId] = useState<number | null>(null);
   const [dragStart, setDragStart] = useState<Point | null>(null);
   const [dragCurrent, setDragCurrent] = useState<Point | null>(null);
-  const [activeCommandBanner, setActiveCommandBanner] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogShapeId, setDialogShapeId] = useState<number | null>(null);
   const [dialogDraft, setDialogDraft] = useState("");
   const [dialogRect, setDialogRect] = useState<Placement | null>(null);
+  // Drives the shimmer cue (see Shape.tsx) — needs to be state, not a ref,
+  // since it has to trigger a re-render when it flips.
+  const [optionDown, setOptionDown] = useState(false);
   const cancelRef = useRef<(() => void) | null>(null);
   const pendingShapeIdRef = useRef<number | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
@@ -97,15 +85,6 @@ export default function App() {
   // Starts a drag's background pipeline at most once, however many times
   // Option gets pressed/released during that drag.
   const pipelineStartedRef = useRef(false);
-  // true = apply onAction results to the shape immediately (normal/button runs).
-  // false = buffer instead (drag in progress, results stay hidden until release).
-  const revealedRef = useRef(true);
-  const pendingActionRef = useRef<ToolCall>(null);
-  // Distinguishes "onAction hasn't fired yet" from "onAction fired but gave
-  // us nothing usable" — both leave pendingActionRef at its null default,
-  // so this flag is what endDragAndOpenDialog actually checks to know
-  // whether there's a final state (good or bad) waiting to be revealed.
-  const pendingActionReceivedRef = useRef(false);
   // Set once when the drag's pipeline starts, so endDragAndOpenDialog can read
   // it back directly instead of looking it up via `shapes.find(...)` — that
   // lookup would close over a stale `shapes` snapshot from drag-start time
@@ -116,6 +95,45 @@ export default function App() {
   // onClassified checks this and attaches the shape to the already-open
   // dialog once it finally shows up, instead of leaving the dialog stuck blank.
   const awaitingDialogShapeRef = useRef(false);
+  // FIFO queue for the actual backend round-trip (classify + Qwen): Qwen/MLX
+  // generation is a single shared, stateful resource (one GPU, one model
+  // object, synchronous calls that block the event loop) — running two
+  // concurrently wouldn't be real parallelism, just contention. Firing
+  // commands quickly used to cancel each other outright (a single app-wide
+  // cancelRef meant starting shape B's command closed shape A's connection
+  // mid-flight, orphaning it as a permanent stub) — queueing fixes that by
+  // construction: only one command is ever actually in flight.
+  const queueRef = useRef<QueuedCommand[]>([]);
+  const queueRunningRef = useRef(false);
+  const nextQueueIdRef = useRef(0);
+  // Which shape (if known yet) and which queue entry the currently-RUNNING
+  // command belongs to — lets cancel actions tell "still queued, never
+  // started" (just remove from the array) apart from "this is the active
+  // one" (actually needs to close its connection and advance the queue).
+  const activeCommandRef = useRef<{ queueId: number; shapeId: number | null } | null>(null);
+  // The blank-dialog case enqueues before any shape exists (dialogShapeId is
+  // still null at that point) — remembers which queue entry to cancel if the
+  // user hits Cancel before it's even started.
+  const dialogQueueIdRef = useRef<number | null>(null);
+  const [queuedCount, setQueuedCount] = useState(0);
+  // Mirrors dialogShapeId into a ref so the dictation routing/key-handling
+  // effects (which intentionally keep empty/minimal dep arrays -- see their
+  // own comments) always read the current value instead of a stale closure.
+  const dialogShapeIdRef = useRef<number | null>(null);
+  useEffect(() => {
+    dialogShapeIdRef.current = dialogShapeId;
+  }, [dialogShapeId]);
+  // Same reason: the speech-event effect needs the drag's start point to
+  // lazily place the stub at the right spot on first speech, without
+  // re-subscribing every time the mouse moves.
+  const dragStartRef = useRef<Point | null>(null);
+  useEffect(() => {
+    dragStartRef.current = dragStart;
+  }, [dragStart]);
+  // Per-shape chat history ("pink circle" then "make it green" -> green
+  // circle, not a fresh guess). Never cleared mid-session; a shape's id is
+  // never reused, so there's nothing to clear it for.
+  const shapeHistoryRef = useRef<Map<number, ChatTurn[]>>(new Map());
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -128,6 +146,100 @@ export default function App() {
   }, []);
 
   useEffect(() => () => cancelRef.current?.(), []);
+
+  // Option is the one dictation key, meaning two different things depending
+  // on what's already happening:
+  //  - mid-drag (dragShapeIdRef set): see the drag effect below, which starts
+  //    the pipeline on mousedown/keydown already -- this handler just starts
+  //    listening. Letting go does NOT end the drag; the box keeps tracking
+  //    the mouse as a plain marquee until mouseup (endDragAndOpenDialog).
+  //  - neither (including a dialog already open): the standalone case,
+  //    dictating into the plain prompt field, or re-dictating into an
+  //    already-open dialog (routed by the speech-event effect below).
+  // Qwen results apply the moment they arrive either way -- see onAction --
+  // so this handler only ever needs to start/stop listening, nothing else.
+  useEffect(() => {
+    function handleKey(e: KeyboardEvent) {
+      if (e.key !== "Alt") return;
+      setOptionDown(e.altKey);
+      if (e.altKey) {
+        if (dragStart != null) maybeStartPipeline();
+        startListening().catch(() => {});
+      } else {
+        stopListening().catch(() => {});
+      }
+    }
+    window.addEventListener("keydown", handleKey);
+    window.addEventListener("keyup", handleKey);
+    return () => {
+      window.removeEventListener("keydown", handleKey);
+      window.removeEventListener("keyup", handleKey);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dragStart]);
+
+  // Routes live transcript events to whichever target is active right now:
+  // the drag's stub shape, the open dialog's shape, or (neither) the plain
+  // prompt field. Volatile text is just a fast, possibly-wrong hint -- it
+  // updates displayed text and re-runs the cheap classifier (type only,
+  // never color, per the live-classify effects elsewhere in this file).
+  // Final text is authoritative enough to actually run Qwen: fires once per
+  // isFinal, for as long as Option stays down (see the handler above for
+  // what gates whether that result gets shown immediately or buffered).
+  useEffect(
+    () =>
+      onSpeechEvent((event) => {
+        if (event.type !== "volatile" && event.type !== "final") return;
+        const text = event.text;
+
+        if (pipelineStartedRef.current) {
+          // First speech of this drag — the stub doesn't exist yet (we don't
+          // show one until there's something to show). Create it now, at
+          // wherever the box has been dragged to so far.
+          if (dragShapeIdRef.current == null) {
+            const start = dragStartRef.current;
+            if (start) {
+              const id = Date.now();
+              dragShapeIdRef.current = id;
+              const rect = computeRect(start, dragCurrentRef.current ?? start);
+              setShapes((ss) => [
+                ...ss,
+                { id, type: "rectangle", position: { x: rect.x, y: rect.y }, width: rect.width, height: rect.height },
+              ]);
+              setFocusedId(id);
+            }
+          }
+          const dragId = dragShapeIdRef.current;
+          if (dragId != null) {
+            dragInputTextRef.current = text;
+            setShapes((ss) => ss.map((s) => (s.id === dragId ? { ...s, inputText: text } : s)));
+            if (event.type === "volatile") {
+              classify(text)
+                .then(({ result }) => {
+                  const type = shapeTypeFromResult(result);
+                  if (type) setShapes((ss) => ss.map((s) => (s.id === dragId ? { ...s, type } : s)));
+                })
+                .catch(() => {});
+            } else {
+              enqueueStream(text, { targetId: dragId });
+            }
+            return;
+          }
+        }
+
+        const dialogId = dialogShapeIdRef.current;
+        if (dialogId != null) {
+          setDialogDraft(text); // re-triggers the existing dialog live-classify effect
+          if (event.type === "final") enqueueStream(text, { targetId: dialogId });
+          return;
+        }
+
+        setPrompt(text);
+        if (event.type === "final") enqueueStream(text);
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
 
   // Tapping anywhere outside the dialog dismisses it — just hides it, doesn't
   // delete the in-progress shape or stop its generation (unlike Cancel).
@@ -169,7 +281,7 @@ export default function App() {
         s.id === id
           ? {
               ...s,
-              type: a.arguments.type === "rectangle" ? "rectangle" : "circle",
+              type: shapeKindFromArgument(a.arguments.type),
               // Always land on a concrete color, same as `type` above — if
               // Qwen didn't specify one (no color was asked for), falling
               // back to undefined here would leave isStub permanently true,
@@ -200,61 +312,91 @@ export default function App() {
       applyResolvedAction(id, a);
     } else {
       setShapes((ss) =>
-        ss.map((s) => (s.id === id ? { ...s, type: s.type ?? "circle", color: s.color ?? "#ffffff" } : s))
+        ss.map((s) => (s.id === id ? { ...s, type: s.type ?? "rectangle", color: s.color ?? "#ffffff" } : s))
       );
     }
   }
 
-  function stream(
-    text: string,
-    opts?: { placement?: Placement; deferReveal?: boolean; targetId?: number; onCreated?: (id: number) => void }
-  ) {
-    cancelRef.current?.();
-    revealedRef.current = !opts?.deferReveal;
-    pendingActionRef.current = null;
-    pendingActionReceivedRef.current = false;
+  function syncQueuedCount() {
+    setQueuedCount(queueRef.current.length);
+  }
+
+  /** Starts the next queued command, if nothing's currently running and
+   * there is one. Called after enqueueing and whenever the active command
+   * finishes (onDone/onError) or gets explicitly cancelled. */
+  function processQueue() {
+    if (queueRunningRef.current) return;
+    const next = queueRef.current.shift();
+    syncQueuedCount();
+    if (!next) return;
+    queueRunningRef.current = true;
+    runStreamNow(next.queueId, next.text, next.opts);
+  }
+
+  /** Public entry point — replaces direct calls to the old `stream()`.
+   * Queues the backend round-trip rather than starting it immediately; the
+   * bounding box itself (drag tracking) stays fully instant regardless,
+   * since that's pure local mouse handling with no backend involved. */
+  function enqueueStream(text: string, opts?: StreamOpts): number {
+    const queueId = ++nextQueueIdRef.current;
+    queueRef.current.push({ queueId, text, opts });
+    syncQueuedCount();
+    processQueue();
+    return queueId;
+  }
+
+  function runStreamNow(queueId: number, text: string, opts?: StreamOpts) {
+    cancelRef.current?.(); // defensive — the queue should mean nothing else is active
+    activeCommandRef.current = { queueId, shapeId: opts?.targetId ?? null };
     setOutput("");
     setCommandStatus("");
     setAction(null);
     setTiming("");
     setStreaming(true);
+    const history = opts?.targetId != null ? shapeHistoryRef.current.get(opts.targetId) ?? [] : [];
     cancelRef.current = runCommand(text, {
       onStatus: (t) => setCommandStatus((s) => (s ? `${s}\n${t}` : t)),
       onClassified: (result) => {
         const type = shapeTypeFromResult(result);
-        if (type) {
-          if (opts?.targetId != null) {
-            const id = opts.targetId;
-            pendingShapeIdRef.current = id;
-            dragShapeIdRef.current = id;
-            setShapes((ss) =>
-              ss.map((s) => (s.id === id ? { ...s, type, inputText: text, streamText: "", color: undefined } : s))
-            );
-          } else {
-            const id = Date.now();
-            pendingShapeIdRef.current = id;
-            dragShapeIdRef.current = id;
-            setShapes((ss) => [
-              ...ss,
-              {
-                id,
-                type,
-                inputText: text,
-                ...(opts?.placement
-                  ? {
-                      position: { x: opts.placement.x, y: opts.placement.y },
-                      width: opts.placement.width,
-                      height: opts.placement.height,
-                    }
-                  : {}),
-              },
-            ]);
-            setFocusedId(id); // new stub takes focus; every other box disappears
-            opts?.onCreated?.(id);
-            if (awaitingDialogShapeRef.current) {
-              setDialogShapeId(id);
-              awaitingDialogShapeRef.current = false;
-            }
+        if (opts?.targetId != null) {
+          // An edit always has somewhere to go, whether or not the cheap
+          // classifier could guess a type from it -- "make it green" has no
+          // shape noun, scores low, but is still a real edit to this shape.
+          // Without this, onAction below would silently have nowhere to
+          // apply the (correct) result it gets back.
+          const id = opts.targetId;
+          pendingShapeIdRef.current = id;
+          setShapes((ss) =>
+            ss.map((s) =>
+              s.id === id ? { ...s, ...(type ? { type } : {}), inputText: text, streamText: "", color: undefined } : s
+            )
+          );
+        } else if (type) {
+          const id = Date.now();
+          pendingShapeIdRef.current = id;
+          if (activeCommandRef.current?.queueId === queueId) {
+            activeCommandRef.current.shapeId = id;
+          }
+          setShapes((ss) => [
+            ...ss,
+            {
+              id,
+              type,
+              inputText: text,
+              ...(opts?.placement
+                ? {
+                    position: { x: opts.placement.x, y: opts.placement.y },
+                    width: opts.placement.width,
+                    height: opts.placement.height,
+                  }
+                : {}),
+            },
+          ]);
+          setFocusedId(id); // new stub takes focus; every other box disappears
+          opts?.onCreated?.(id);
+          if (awaitingDialogShapeRef.current) {
+            setDialogShapeId(id);
+            awaitingDialogShapeRef.current = false;
           }
         } else {
           pendingShapeIdRef.current = null;
@@ -274,45 +416,52 @@ export default function App() {
         const id = pendingShapeIdRef.current;
         pendingShapeIdRef.current = null;
         if (id != null) {
-          if (revealedRef.current) {
-            resolveShape(id, a);
-          } else {
-            // Drag still in progress — hold onto this until mouseup/Option-up,
-            // whether it's a real action or a failed one (`a` null) — either
-            // way there's a final state to reveal once we can.
-            pendingActionRef.current = a;
-            pendingActionReceivedRef.current = true;
+          if (a && a.name === "create_shape") {
+            const prior = shapeHistoryRef.current.get(id) ?? [];
+            shapeHistoryRef.current.set(id, [
+              ...prior,
+              { role: "user", content: text },
+              { role: "assistant", content: describeAction(a) },
+            ]);
           }
+          // Applies immediately, drag/dictation in progress or not — results
+          // show up live, not just once the mouse comes up.
+          resolveShape(id, a);
         }
         // Deliberately not re-focusing here: if the user already deselected
         // (e.g. clicked the canvas) while this was still generating,
         // resolving it shouldn't un-deselect it.
       },
       onTiming: (label, seconds) => setTiming(`${label}: ${seconds.toFixed(3)}s`),
-      onDone: () => setStreaming(false),
+      onDone: () => {
+        setStreaming(false);
+        activeCommandRef.current = null;
+        queueRunningRef.current = false;
+        processQueue();
+      },
       onError: (e) => {
         setStreaming(false);
         setOutput((o) => `${o}\n[${e.message}]`);
+        activeCommandRef.current = null;
+        queueRunningRef.current = false;
+        processQueue();
       },
-    });
+    }, history, opts?.targetId != null, opts?.targetId ?? null);
   }
 
-  function maybeStartPipeline(start: Point, current: Point) {
+  // Marks the drag as an Option-dictation drag. No shape yet — the plain blue
+  // marquee (SelectionRect, "editing" variant) keeps showing until speech
+  // actually says something; the stub itself is created lazily, the moment
+  // the first speech event arrives (see the speech-event effect above).
+  function maybeStartPipeline() {
     if (pipelineStartedRef.current) return;
-    if (status !== "online" || streaming) return;
-    const text =
-      NATURAL_CREATE_SHAPE_COMMANDS[Math.floor(Math.random() * NATURAL_CREATE_SHAPE_COMMANDS.length)];
+    if (status !== "online") return; // `streaming` deliberately NOT checked — this should queue, not block
     pipelineStartedRef.current = true;
-    dragInputTextRef.current = text;
-    setActiveCommandBanner(text);
-    const rect = computeRect(start, current);
-    stream(text, { placement: rect, deferReveal: true });
   }
 
   function cleanupDrag() {
     setDragStart(null);
     setDragCurrent(null);
-    setActiveCommandBanner(null);
     pipelineStartedRef.current = false;
     dragShapeIdRef.current = null;
     dragInputTextRef.current = "";
@@ -326,14 +475,8 @@ export default function App() {
       return;
     }
     const rect = computeRect(start, current);
-    revealedRef.current = true;
     const shapeId = dragShapeIdRef.current;
     const pipelineWasStarted = pipelineStartedRef.current;
-    if (shapeId != null && pendingActionReceivedRef.current) {
-      resolveShape(shapeId, pendingActionRef.current);
-      pendingActionRef.current = null;
-      pendingActionReceivedRef.current = false;
-    }
     // pipelineWasStarted but shapeId is still null: classification hasn't
     // come back yet. Open with what we already know (the typed text) and let
     // onClassified attach the shape once it actually arrives.
@@ -382,28 +525,18 @@ export default function App() {
       dragCurrentRef.current = pointFromEvent(e);
       if (rafId == null) rafId = requestAnimationFrame(flush);
     }
-    function handleKeyChange(e: KeyboardEvent) {
-      if (e.key !== "Alt") return;
-      const current = dragCurrentRef.current ?? start;
-      if (e.altKey) {
-        maybeStartPipeline(start, current);
-      } else if (pipelineStartedRef.current) {
-        endDragAndOpenDialog(start, current);
-      }
-    }
+    // Option press/release during the drag is handled by the consolidated
+    // key effect above (it starts the pipeline / toggles dictation) — Option
+    // no longer ends the drag. Only mouseup does.
     function handleUp() {
       const current = dragCurrentRef.current ?? start;
       endDragAndOpenDialog(start, current);
     }
     window.addEventListener("mousemove", handleMove);
     window.addEventListener("mouseup", handleUp);
-    window.addEventListener("keydown", handleKeyChange);
-    window.addEventListener("keyup", handleKeyChange);
     return () => {
       window.removeEventListener("mousemove", handleMove);
       window.removeEventListener("mouseup", handleUp);
-      window.removeEventListener("keydown", handleKeyChange);
-      window.removeEventListener("keyup", handleKeyChange);
       if (rafId != null) cancelAnimationFrame(rafId);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -417,7 +550,7 @@ export default function App() {
     setDragStart(point);
     setDragCurrent(point);
     if (e.altKey) {
-      maybeStartPipeline(point, point);
+      maybeStartPipeline();
     }
   }
 
@@ -429,24 +562,21 @@ export default function App() {
       ? computeRect(dragStart, dragCurrent)
       : null;
 
-  async function ping() {
-    try {
-      setPingResult(JSON.stringify(await health()));
-    } catch (e) {
-      setPingResult(`error: ${(e as Error).message}`);
-    }
-  }
-
   function closeDialog() {
     setDialogOpen(false);
     setDialogShapeId(null);
     setDialogDraft("");
     setDialogRect(null);
     awaitingDialogShapeRef.current = false;
+    dialogQueueIdRef.current = null;
   }
 
   function handleClear() {
     cancelRef.current?.();
+    queueRef.current = [];
+    queueRunningRef.current = false;
+    activeCommandRef.current = null;
+    syncQueuedCount();
     setShapes([]);
     setFocusedId(null);
     setStreaming(false);
@@ -455,21 +585,42 @@ export default function App() {
     setAction(null);
     setTiming("");
     closeDialog();
-    setActiveCommandBanner(null);
     pendingShapeIdRef.current = null;
     dragShapeIdRef.current = null;
     pipelineStartedRef.current = false;
-    revealedRef.current = true;
-    pendingActionRef.current = null;
-    pendingActionReceivedRef.current = false;
     dragInputTextRef.current = "";
   }
 
+  /** Cancelling a shape/entry that's still sitting in the queue (never
+   * started) just removes it — no connection was ever opened. Cancelling the
+   * one actually RUNNING needs to close its connection and explicitly
+   * advance the queue, since runCommand's cancel path marks itself
+   * "finished" before closing — onError never fires for an explicit cancel,
+   * so nothing else would ever flip queueRunningRef back off. */
   function handleDialogCancel() {
-    cancelRef.current?.(); // stop generation if still in flight
     if (dialogShapeId != null) {
-      setShapes((ss) => ss.filter((s) => s.id !== dialogShapeId));
-      setFocusedId((f) => (f === dialogShapeId ? null : f));
+      const shapeId = dialogShapeId;
+      queueRef.current = queueRef.current.filter((item) => item.opts?.targetId !== shapeId);
+      syncQueuedCount();
+      if (activeCommandRef.current?.shapeId === shapeId) {
+        cancelRef.current?.();
+        activeCommandRef.current = null;
+        queueRunningRef.current = false;
+        processQueue();
+      }
+      setShapes((ss) => ss.filter((s) => s.id !== shapeId));
+      setFocusedId((f) => (f === shapeId ? null : f));
+    } else if (dialogQueueIdRef.current != null) {
+      // Blank dialog, still waiting its turn — no shape exists yet to key on.
+      const queueId = dialogQueueIdRef.current;
+      queueRef.current = queueRef.current.filter((item) => item.queueId !== queueId);
+      syncQueuedCount();
+      if (activeCommandRef.current?.queueId === queueId) {
+        cancelRef.current?.();
+        activeCommandRef.current = null;
+        queueRunningRef.current = false;
+        processQueue();
+      }
     }
     closeDialog();
   }
@@ -478,9 +629,12 @@ export default function App() {
     const text = dialogDraft;
     if (!text.trim()) return;
     if (dialogShapeId != null) {
-      stream(text, { targetId: dialogShapeId });
+      enqueueStream(text, { targetId: dialogShapeId });
     } else if (dialogRect) {
-      stream(text, { placement: dialogRect, onCreated: (id) => setDialogShapeId(id) });
+      dialogQueueIdRef.current = enqueueStream(text, {
+        placement: dialogRect,
+        onCreated: (id) => setDialogShapeId(id),
+      });
     }
   }
 
@@ -502,6 +656,10 @@ export default function App() {
             color={s.color}
             opacity={s.opacity}
             focused={s.id === focusedId}
+            shimmering={
+              (s.id === dragShapeIdRef.current && dragStart != null) ||
+              (s.id === dialogShapeIdRef.current && optionDown)
+            }
             inputText={s.inputText}
             streamText={s.streamText}
           />
@@ -509,13 +667,13 @@ export default function App() {
         {/* Once a stub exists for this drag, its own frame already shows a box
             in the same spot — showing the plain marquee too would double it up. */}
         {dragRect && dragShapeIdRef.current == null && (
-          <SelectionRect {...dragRect} flagText={activeCommandBanner ?? undefined} />
+          <SelectionRect {...dragRect} />
         )}
         {/* Blank-dialog case (plain drag, no Option) — nothing exists at the
             drawn spot yet, so anchor the dialog with a placeholder box until
             Generate creates the real shape there. */}
         {dialogOpen && dialogShapeId == null && dialogRect && (
-          <SelectionRect {...dialogRect} variant="selected" flagText="Whatever you say will go here" />
+          <SelectionRect {...dialogRect} flagText="Whatever you say will go here" />
         )}
         {dialogOpen && dialogRect && (
           <Dialog
@@ -528,20 +686,15 @@ export default function App() {
           />
         )}
       </div>
-      {/*<section>
-        <h2>HTTP</h2>
-        <button onClick={ping} disabled={status !== "online"}>
-          GET /health
-        </button>
-        <pre>{pingResult || "—"}</pre>
-      </section>*/}
 
       <section>
         <input value={prompt} onChange={(e) => setPrompt(e.target.value)} />
-        <button onClick={() => stream(prompt)} disabled={status !== "online" || streaming}>
+        <button onClick={() => enqueueStream(prompt)} disabled={status !== "online"}>
           Run command
         </button>
         <button onClick={handleClear}>Clear</button>
+        {streaming && <span> · running</span>}
+        {queuedCount > 0 && <span> · {queuedCount} queued</span>}
 
         <pre
           style={{

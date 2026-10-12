@@ -1,14 +1,19 @@
 import { memo, useState } from "react";
 
 export type ShapeProps = {
-  /** "circle" (default) or "rectangle" (covers squares too — equal width/height). */
-  type?: "circle" | "rectangle";
+  /** "rectangle" (default — covers squares too, equal width/height), "circle",
+   * "triangle", or "star". */
+  type?: "circle" | "rectangle" | "triangle" | "star";
   size?: number;
   width?: number;
   height?: number;
   color?: string;
   opacity?: number;
   focused?: boolean;
+  /** True while this shape is the active dictation target (dragging it, or
+   * Option held re-editing its open dialog) — pulses whatever color it
+   * currently has as a "best guess, might still change" cue. */
+  shimmering?: boolean;
   inputText?: string;
   streamText?: string;
   /** Exact top-left placement in canvas px. When set, this shape skips the
@@ -25,6 +30,18 @@ function randomJitter() {
 
 export const CORNERS = ["tl", "tr", "bl", "br"] as const;
 
+// clip-path polygons, not border-radius — a triangle/star can't be expressed
+// as a radius. Points are percentages of the shape's own box, so (like
+// border-radius: 50% already did for circles) these stretch to fill
+// non-square boxes exactly, same as every other shape here.
+const TRIANGLE_CLIP_PATH = "polygon(50% 0%, 0% 100%, 100% 100%)";
+const STAR_CLIP_PATH =
+  "polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%)";
+
+export function shapeLabel(type: NonNullable<ShapeProps["type"]>): string {
+  return type.charAt(0).toUpperCase() + type.slice(1);
+}
+
 /**
  * A shape (circle or rectangle) placed near the center of its parent, offset
  * by a random 50-100px jitter on each axis. Uses plain absolute top/left (no
@@ -39,36 +56,41 @@ export const CORNERS = ["tl", "tr", "bl", "br"] as const;
  * React's default shallow prop comparison correctly skips them.
  */
 function Shape({
-  type = "circle",
+  type = "rectangle",
   size = 150,
   width,
   height,
   color,
   opacity = 0.8,
   focused = false,
+  shimmering = false,
   inputText,
   position,
 }: ShapeProps) {
   const [offsetX] = useState(randomJitter);
   const [offsetY] = useState(randomJitter);
 
-  // No color yet = still a stub (unresolved tool call) — pulses gray regardless
-  // of focus. The bounding box (frame/handles/flags) only ever shows on the one
-  // currently-focused shape, dashed while it's a stub or solid once resolved.
-  const isStub = color === undefined;
-  const frameVariant = !focused ? null : isStub ? "stub" : "selected";
+  // No color yet = still an unresolved stub — gray, regardless of focus or
+  // shimmer. Once a color exists it always shows, even mid-shimmer: shimmer
+  // just marks the current color as a provisional "best guess" (see App.tsx
+  // for when that's true), it never hides it.
+  const hasColor = color !== undefined;
+  const showFrame = focused;
   const w = width ?? size;
   const h = height ?? size;
-  const borderRadius = type === "circle" ? "50%" : "8px";
-  // border-radius: 50% on a non-square box renders an ellipse filling it exactly,
-  // so a box-drawn rectangle (w !== h) doesn't need any different shape handling.
+  // border-radius: 50% on a non-square box renders an ellipse filling it
+  // exactly, so a box-drawn rectangle (w !== h) doesn't need any different
+  // shape handling. Triangle/star use clip-path instead since neither is
+  // expressible as a radius; border-radius is simply unused for them.
+  const borderRadius = type === "circle" ? "50%" : type === "rectangle" ? "8px" : undefined;
+  const clipPath = type === "triangle" ? TRIANGLE_CLIP_PATH : type === "star" ? STAR_CLIP_PATH : undefined;
   const top = position ? `${position.y}px` : `calc(50% - ${h / 2}px + ${offsetY}px)`;
   const left = position ? `${position.x}px` : `calc(50% - ${w / 2}px + ${offsetX}px)`;
 
   return (
     <>
       <div
-        className={isStub ? "shape-stub" : undefined}
+        className={shimmering ? "shimmer" : undefined}
         style={{
           position: "absolute",
           top,
@@ -76,23 +98,22 @@ function Shape({
           width: w,
           height: h,
           borderRadius,
+          clipPath,
           backgroundColor: color ?? "#ccc",
-          opacity: isStub ? undefined : opacity,
+          opacity: shimmering ? undefined : opacity,
         }}
       />
-      {frameVariant && (
-        <div className={`shape-frame shape-frame-${frameVariant}`} style={{ top, left, width: w, height: h }}>
+      {showFrame && (
+        <div className="shape-frame" style={{ top, left, width: w, height: h }}>
           {CORNERS.map((corner) => (
-            <span key={corner} className={`shape-handle shape-handle-${frameVariant} handle-${corner}`} />
+            <span key={corner} className={`shape-handle handle-${corner}`} />
           ))}
           {inputText !== undefined && (
             <div className="shape-flags">
               <div className="shape-flag">{inputText}</div>
-              {!isStub && (
+              {hasColor && (
                 <div className="shape-flag">
-                  {`${type === "circle" ? "Circle" : "Rectangle"} · Color: ${color}, Size: ${
-                    w === h ? `${w}px` : `${w}x${h}px`
-                  }`}
+                  {`${shapeLabel(type)} · Color: ${color}, Size: ${w === h ? `${w}px` : `${w}x${h}px`}`}
                 </div>
               )}
             </div>

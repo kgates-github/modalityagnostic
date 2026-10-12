@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { type ShapeProps } from "./Shape";
+import { shapeLabel, type ShapeProps } from "./Shape";
 
 export type DialogShape = ShapeProps & { id: number };
 
@@ -52,7 +52,7 @@ export default function Dialog({ shape, rect, draft, onDraftChange, onCancel, on
       {shape && (
         <div className="dialog-stream">
           {resolved
-            ? `${shape.type === "rectangle" ? "Rectangle" : "Circle"} · Color: ${shape.color}, Size: ${
+            ? `${shapeLabel(shape.type ?? "circle")} · Color: ${shape.color}, Size: ${
                 w === h ? `${w}px` : `${w}x${h}px`
               }`
             : "Working..."}
