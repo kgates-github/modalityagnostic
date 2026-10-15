@@ -1,6 +1,6 @@
 """Primes an MLX prompt cache over a fixed prefix shared by every call to a
 given prompt-building function (e.g. the tools schema + instructions ahead of
-create_shape tool-calling requests — identical regardless of what the user
+create_component tool-calling requests — identical regardless of what the user
 actually typed), so each individual request only needs to process its own
 handful of new tokens instead of reprocessing hundreds of tokens of
 boilerplate every single time.
@@ -18,6 +18,8 @@ correct-but-slower path if a request's tokenization ever disagrees with that
 reference right at the boundary, rather than risking subtly wrong output).
 """
 
+import copy
+
 import mlx.core as mx
 from mlx_lm.generate import generation_stream
 from mlx_lm.models.cache import make_prompt_cache
@@ -34,8 +36,22 @@ def common_prefix_len(a, b):
 
 def clone_cache(cache):
     """Independent copy — each request needs its own state, these aren't a
-    continuing conversation sharing one mutable cache."""
-    return [type(c).from_state(c.state, c.meta_state) for c in cache]
+    continuing conversation sharing one mutable cache.
+
+    `c.state` returns the cache's live keys/values arrays BY REFERENCE, not a
+    copy (see mlx_lm's cache.py: the getter is just `return self.keys,
+    self.values`). Several of this model's per-layer cache types write into
+    their buffers in place (rotating/pre-allocated KV buffers, not
+    concatenation), so a plain `from_state(c.state, ...)` clone shares actual
+    storage with the original -- generating against the "clone" was mutating
+    _base_cache's own buffers. After enough requests the primed prefix was
+    corrupted into garbage, and every call from then on degenerated into one
+    fixed, repeated hallucinated output regardless of input (measured: 4
+    correct calls, then 21/21 identical wrong ones). copy.deepcopy forces
+    real distinct storage per array (verified: mutating one leaves the other
+    untouched), which plain reassignment through from_state does not.
+    """
+    return [type(c).from_state(copy.deepcopy(c.state), c.meta_state) for c in cache]
 
 
 class PrimedPromptCache:
@@ -44,9 +60,9 @@ class PrimedPromptCache:
         `reference_calls` is two (user_input, history) pairs — whatever's
         identical between their token sequences is what gets primed. Pass two
         different histories (not none) when every real call this cache will
-        serve carries history, e.g. a shape's 2nd+ edit — the true shared
+        serve carries history, e.g. a widget's 2nd+ edit — the true shared
         prefix there is just the system/tools block, since history itself
-        varies per shape; diffing two no-history calls instead would
+        varies per widget; diffing two no-history calls instead would
         (wrongly) bake the no-history instruction text into the prefix too,
         and then miss on every real request."""
         ref_a = build_tokens(*reference_calls[0])

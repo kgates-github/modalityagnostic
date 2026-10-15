@@ -28,8 +28,25 @@ final class SpeechTranscriberSource: TranscriptSource, @unchecked Sendable {
     private var analyzer: SpeechAnalyzer?
     private var captureProvider: CaptureInputSequenceProvider?
 
+    // stop() tears a session down via an unawaited background Task (it has
+    // to finalize() before it can cancel -- see stop() below), so a NEW
+    // start() can begin running concurrently with an OLD session's teardown
+    // still in flight. If that old session's trailing "final" (the real
+    // result stop() was waiting to flush) lands after the new session has
+    // already started, there's nothing distinguishing it as stale -- it
+    // reads as a perfectly normal event for the CURRENT session, and the
+    // client ends up applying the previous utterance's text/type to the
+    // brand new bounding box (measured: reproduced exactly this way).
+    // generation tags which start() a given result loop belongs to; any
+    // result produced after a NEWER start() has begun gets dropped instead
+    // of emitted, the same way the client itself only trusts its current
+    // closure-bound session (see bindSpeechSession in App.tsx).
+    private var generation = 0
+
     func start(onEvent: @escaping @Sendable (String, String) -> Void) {
         stop()
+        generation += 1
+        let myGeneration = generation
         task = Task {
             do {
                 let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale.current) ?? Locale(identifier: "en-US")
@@ -58,24 +75,50 @@ final class SpeechTranscriberSource: TranscriptSource, @unchecked Sendable {
                 onEvent("status", "listening")
 
                 for try await result in transcriber.results {
-                    if Task.isCancelled { break }
+                    if Task.isCancelled || myGeneration != generation { break }
                     let text = String(result.text.characters)
                     onEvent(result.isFinal ? "final" : "volatile", text)
                 }
             } catch {
-                onEvent("error", "\(error)")
+                if myGeneration == generation {
+                    onEvent("error", "\(error)")
+                }
             }
         }
     }
 
     func stop() {
-        task?.cancel()
-        task = nil
+        // Measured via logs: finalizeAndFinishThroughEndOfInput() never
+        // produced a "final" event at all -- only ever volatile, then
+        // nothing, forever. Root cause: it waits for the INPUT SEQUENCE to
+        // reach a natural end, but CaptureInputSequenceProvider exposes no
+        // way to actually end analyzerInputs -- stopping the capture session
+        // halts new audio, it doesn't terminate that AsyncSequence. So the
+        // await just hangs.
+        //
+        // finalize(through:) is the right call for a live, user-stopped
+        // session: it finalizes whatever's already been analyzed without
+        // needing end-of-input. No cutoff time to pass (nothing here tracks
+        // one), so nil -- finalize everything available right now. Follow up
+        // with cancelAndFinishNow() to actually tear the analyzer down,
+        // which is fine to be abrupt about since finalize() already flushed
+        // the real result first.
+        //
+        // Don't cancel the results-reading task up front either: the loop in
+        // start() checks Task.isCancelled and breaks immediately, which
+        // would beat finalize to the punch and drop the result it's about to
+        // produce.
         captureProvider?.captureSession.stopRunning()
         captureProvider = nil
         let analyzerToStop = analyzer
         analyzer = nil
-        Task { await analyzerToStop?.cancelAndFinishNow() }
+        let taskToRelease = task
+        task = nil
+        Task {
+            try? await analyzerToStop?.finalize(through: nil)
+            await analyzerToStop?.cancelAndFinishNow()
+            taskToRelease?.cancel()
+        }
     }
 }
 

@@ -10,33 +10,41 @@ from mlx_lm import load, stream_generate
 from sentence_transformers import SentenceTransformer, util
 
 from .tools import tools
-from .commands import commands
+from .components import COMPONENT_KINDS, commands
 from .prompt_cache import PrimedPromptCache
 
-# --- Call log: one file per shape, each line one call in order --------------
-# logs/shapes/<shape_id>.jsonl is that shape's whole pipeline path, start to
-# finish -- no grouping needed to read it, just open the file. Calls with no
-# shape yet (the plain prompt-field button, before a shape exists to attach
+# --- Event log: one file per widget, each line one pipeline event in order --
+# logs/widgets/<widget_id>.jsonl is that widget's whole pipeline path, start
+# to finish -- no grouping needed to read it, just open the file. Events with
+# no widget yet (the plain prompt-field button, before one exists to attach
 # to) land in _unassigned.jsonl instead.
+#
+# Each row is one stage transition: {ts, widget_id, stage, event, ...fields}.
+# `stage` is a pipeline step ("classify", "qwen", "speech", "lifecycle", ...),
+# `event` is usually "start"/"end" (classify, qwen) or a point-in-time label
+# (mousedown, volatile, final) for stages with no duration. This is the
+# Gantt-chart source: group a widget's rows by stage, pair start/end by ts.
 
-_SHAPES_LOG_DIR = Path(__file__).resolve().parent.parent / "logs" / "shapes"
-_SHAPES_LOG_DIR.mkdir(parents=True, exist_ok=True)
+_WIDGETS_LOG_DIR = Path(__file__).resolve().parent.parent / "logs" / "widgets"
+_WIDGETS_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def log_call(shape_id, **fields):
-    path = _SHAPES_LOG_DIR / f"{shape_id if shape_id is not None else '_unassigned'}.jsonl"
+def log_event(widget_id, stage, event, **fields):
+    path = _WIDGETS_LOG_DIR / f"{widget_id if widget_id is not None else '_unassigned'}.jsonl"
     with open(path, "a") as f:
-        f.write(json.dumps({"ts": time.time(), "shape_id": shape_id, **fields}) + "\n")
+        f.write(
+            json.dumps({"ts": time.time(), "widget_id": widget_id, "stage": stage, "event": event, **fields}) + "\n"
+        )
 
 
 # --- Model setup (loaded once, at sidecar startup) --------------------------
 
 
-class ShapeModel:
-    """One create_shape-calling model: its own weights, prompt-cache prefix,
+class WidgetModel:
+    """One create_component-calling model: its own weights, prompt-cache prefix,
     and instruction text. Two of these exist (see below) — a small, fast one
-    for a shape's first resolution, a bigger, slower-but-more-careful one for
-    refining a shape that already exists (its history is what tells them
+    for a widget's first resolution, a bigger, slower-but-more-careful one for
+    refining a widget that already exists (its history is what tells them
     apart — see ws_command)."""
 
     def __init__(self, repo, instructions, reference_calls):
@@ -45,7 +53,7 @@ class ShapeModel:
         self.cache = PrimedPromptCache(self.model, self.build_tokens, reference_calls=reference_calls)
 
     def build_tokens(self, user_input, history=None):
-        # `history` (prior {role, content} turns for the shape being edited,
+        # `history` (prior {role, content} turns for the widget being edited,
         # e.g. "Created a pink circle.") comes after the cached prefix, so an
         # edit like "make it green" resolves against what was already decided.
         messages = [
@@ -69,35 +77,40 @@ class ShapeModel:
 # tool at all (measured: failed 2 of 3 test prompts) -- spelling out that a
 # tool call is mandatory fixed it (5 of 5 after).
 #
-# shape_model_small only ever gets history=None calls (a shape's first
+# widget_model_small only ever gets history=None calls (a widget's first
 # resolution -- see ws_command), so its reference calls stay plain, same as
-# before. shape_model only ever gets history-bearing calls (every edit after
+# before. widget_model only ever gets history-bearing calls (every edit after
 # that) -- its reference calls use two DIFFERENT dummy histories instead, so
 # what's primed is just the true shared prefix (the system/tools block),
 # not accidentally the no-history instruction text too (which a real,
 # history-bearing call would never actually match).
-shape_model = ShapeModel(
+widget_model = WidgetModel(
     "mlx-community/Qwen3.5-4B-4bit",
-    "INSTRUCTIONS: Keep responses very concise and short.",
+    "INSTRUCTIONS: Keep responses very concise and short. If the user does not "
+    "mention a color, do not include the color parameter at all -- never guess "
+    "or invent one.",
     reference_calls=[
         ("make it bigger", [{"role": "user", "content": "create a blue circle"}, {"role": "assistant", "content": "Made a blue circle."}]),
         ("make it smaller", [{"role": "user", "content": "create a red square"}, {"role": "assistant", "content": "Made a red square."}]),
     ],
 )
-shape_model_small = ShapeModel(
+widget_model_small = WidgetModel(
     "mlx-community/Qwen3.5-0.8B-MLX-4bit",
-    "INSTRUCTIONS: You must always respond by calling the create_shape function -- "
+    "INSTRUCTIONS: You must always respond by calling the create_component function -- "
     "never reply in plain text, only a <tool_call> block. For color, pass the plain "
     "color word the user said (e.g. 'yellow', 'orange') -- do not convert it to hex, "
     # this model's hex conversion is unreliable (measured: wrong 4 of 8 times --
     # purple/pink both became magenta, yellow/orange both became red); the plain
     # word is valid CSS on its own and sidesteps the conversion step entirely.
-    "that step isn't needed. Keep it concise.",
+    "that step isn't needed. If the user does not mention a color, do not include "
+    # measured: left bare (no color mentioned), this model invents one anyway
+    # about 1 in 10 tries (e.g. red) instead of leaving the parameter out.
+    "the color parameter at all -- never guess or invent one. Keep it concise.",
     reference_calls=[("Create a blue circle", None), ("Make a big red square", None)],
 )
 # Kept for ask_qwen/evaluate_outcome below, which aren't on the fast path and
 # always want the bigger model — aliases, not a second load.
-qwen_model, qwen_tokenizer = shape_model.model, shape_model.tokenizer
+qwen_model, qwen_tokenizer = widget_model.model, widget_model.tokenizer
 
 embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 
@@ -133,9 +146,9 @@ def escalate_to_frontier(user_input):
 
 def stream_call_qwen_function(user_input, history=None, use_small=False):
     """Generator: yields each raw text chunk from the function-calling pass.
-    use_small picks the fast 0.8B model (a shape's first resolution, no
+    use_small picks the fast 0.8B model (a widget's first resolution, no
     history yet) over the 4B one (every edit after that)."""
-    model = shape_model_small if use_small else shape_model
+    model = widget_model_small if use_small else widget_model
     yield from model.stream(user_input, history)
 
 
@@ -162,6 +175,41 @@ def parse_tool_call(full_response):
         return json.loads(block)
     except json.JSONDecodeError:
         return None
+
+
+# "Don't guess a color" is a prompt instruction, not a guarantee -- measured,
+# the 0.8B model is unreliable in BOTH directions, not just one:
+#  - invents a color that was never said (e.g. "red") ~1 in 10 bare calls.
+#  - drops a color that plainly WAS said -- measured deterministically: "Green
+#    Star."/"Green Triangle." omitted color every single time (6/6), while
+#    "Green Circle."/"Green Square." kept it every time. No clean rule behind
+#    which shape words trigger it -- just small-model brittleness.
+# Either way, trust the literal text over the model's call: this is a
+# deterministic backstop on top of (not instead of) the prompt instructions.
+_COLOR_WORD_RE = re.compile(
+    r"#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)|"
+    r"\b(red|blue|green|yellow|orange|purple|pink|black|white|gray|grey|brown|"
+    r"cyan|magenta|violet|indigo|teal|maroon|navy|gold|silver|beige|lime|olive|"
+    r"turquoise|coral|salmon|lavender|crimson|khaki|plum|orchid|tan|chocolate|"
+    r"ivory|aqua|fuchsia)\b",
+    re.IGNORECASE,
+)
+
+
+def reconcile_color(action, user_input):
+    """Strip a color the model invented with no basis in the text, or
+    backfill one it dropped despite the text plainly naming it -- see the
+    measurements above. Mutates and returns `action`."""
+    if not action:
+        return action
+    args = action.setdefault("arguments", {})
+    match = _COLOR_WORD_RE.search(user_input)
+    if args.get("color"):
+        if not match:
+            del args["color"]
+    elif match:
+        args["color"] = match.group(0)
+    return action
 
 
 def evaluate_outcome(user_input, tool_call):
@@ -211,9 +259,31 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/components")
+async def components_endpoint():
+    """The component registry's stubs -- kind name -> inner SVG markup
+    (0-100 viewBox, fill="currentColor"). The frontend fetches this once at
+    startup and renders every widget from it, so a new ComponentKind in
+    components.py needs nothing touched on the frontend to show up."""
+    return {k.name: k.svg for k in COMPONENT_KINDS}
+
+
+@app.post("/log-event")
+async def log_event_endpoint(payload: dict):
+    """Client-side pipeline events (mousedown, dictated text) -- the server
+    can't see these on its own, so the frontend posts them here to land in
+    the same per-widget log as the classify/qwen stages below."""
+    widget_id = payload.get("widget_id")
+    stage = str(payload.get("stage", "client"))
+    event = str(payload.get("event", ""))
+    extra = {k: v for k, v in payload.items() if k not in ("widget_id", "stage", "event")}
+    log_event(widget_id, stage, event, **extra)
+    return {"status": "ok"}
+
+
 @app.get("/classify")
 async def classify_endpoint(text: str = ""):
-    """Cheap, synchronous classify-only check — used for the live shape-type
+    """Cheap, synchronous classify-only check — used for the live widget-type
     guess while editing text (e.g. the dialog textarea), separate from the
     full /ws/command pipeline which also runs the much slower Qwen pass."""
     if not text.strip():
@@ -237,18 +307,26 @@ async def ws_command(websocket: WebSocket):
             msg = await websocket.receive_json()
             user_input = str(msg.get("prompt", ""))
             history = msg.get("history") or []
-            # An edit to a shape that already exists (targetId set client-side)
-            # doesn't need the classifier's shape-command gate — we already
-            # know it's shape-editing speech. Short edits like "make it green"
-            # have no shape noun and score low on their own, so without this
-            # they'd wrongly fall into the escalate stub below and never
-            # reach Qwen at all.
-            is_edit = bool(msg.get("is_edit"))
-            shape_id = msg.get("shape_id")
+            # A widget that's already been resolved once (has history) doesn't
+            # need the classifier's widget-command gate for its next edit — we
+            # already know it's widget-editing speech. Short edits like "make
+            # it green" have no widget noun and score low on their own, so
+            # without this they'd wrongly fall into the escalate branch below.
+            #
+            # Deliberately NOT keyed on whether a widget/targetId already
+            # exists: dictation creates its stub locally before ever calling
+            # Qwen, so a widget id exists even on the very FIRST utterance --
+            # keying on that would skip the gate then too, and something
+            # genuinely out of scope ("I want a bar chart") would reach Qwen
+            # anyway instead of escalating, forcing it to invent an answer.
+            is_edit = len(history) > 0
+            widget_id = msg.get("widget_id")
 
             t_start = time.perf_counter()
+            log_event(widget_id, "classify", "start", prompt=user_input)
             result, score = classify(user_input)
             classify_elapsed = time.perf_counter() - t_start
+            log_event(widget_id, "classify", "end", result=result, score=float(score), seconds=classify_elapsed)
             await websocket.send_json(
                 {
                     "type": "status",
@@ -264,28 +342,24 @@ async def ws_command(websocket: WebSocket):
             if result == "escalate_to_frontier" and not is_edit:
                 await websocket.send_json({"type": "status", "text": "Escalating to frontier model..."})
                 await asyncio.sleep(0)
+                log_event(widget_id, "escalate", "start")
                 escalate_to_frontier(user_input)
-                log_call(
-                    shape_id,
-                    prompt=user_input,
-                    is_edit=is_edit,
-                    history_turns=len(history),
-                    classify_result=result,
-                    classify_score=float(score),
-                    model="escalated",
-                    action=None,
-                    seconds=time.perf_counter() - t_start,
-                )
-                await websocket.send_json({"type": "action", "action": None})
+                log_event(widget_id, "escalate", "end", seconds=time.perf_counter() - t_start)
+                # escalated: true distinguishes "never tried" (classifier couldn't
+                # place this at all) from a genuine parse failure after a real
+                # Qwen attempt -- the client treats those very differently.
+                await websocket.send_json({"type": "action", "action": None, "escalated": True})
                 await websocket.send_json({"type": "done"})
                 continue
 
-            # No history yet = this shape's first resolution -> fast model.
+            # No history yet = this widget's first resolution -> fast model.
             # Once it has history (any edit after that) -> the bigger one.
             use_small = len(history) == 0
             await websocket.send_json({"type": "status", "text": "Working...\n"})
             await asyncio.sleep(0)
 
+            qwen_t_start = time.perf_counter()
+            log_event(widget_id, "qwen", "start", model="small" if use_small else "big", prompt=user_input)
             full_response = ""
             for piece in stream_call_qwen_function(user_input, history, use_small):
                 full_response += piece
@@ -295,22 +369,28 @@ async def ws_command(websocket: WebSocket):
             print()
 
             action = parse_tool_call(full_response)
-            total_elapsed = time.perf_counter() - t_start
-            log_call(
-                shape_id,
-                prompt=user_input,
-                is_edit=is_edit,
-                history_turns=len(history),
-                classify_result=result,
-                classify_score=float(score),
+            if not history:
+                # Only on a widget's first-ever resolution -- on an edit,
+                # Qwen echoing an already-established color from context is
+                # legitimate even if this specific utterance doesn't repeat
+                # the word, so the guard would false-positive there.
+                action = reconcile_color(action, user_input)
+            log_event(
+                widget_id,
+                "qwen",
+                "end",
                 model="small" if use_small else "big",
                 action=action,
-                seconds=total_elapsed,
+                seconds=time.perf_counter() - qwen_t_start,
             )
 
             await websocket.send_json({"type": "action", "action": action})
             await websocket.send_json(
-                {"type": "timing", "label": "text_input_to_function_call", "seconds": total_elapsed}
+                {
+                    "type": "timing",
+                    "label": "text_input_to_function_call",
+                    "seconds": time.perf_counter() - t_start,
+                }
             )
             await websocket.send_json({"type": "done"})
     except WebSocketDisconnect:
