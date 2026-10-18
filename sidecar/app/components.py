@@ -491,6 +491,84 @@ COMPONENT_KINDS: list[ComponentKind] = [
             'stroke-width="2" stroke-linecap="round"/>'
         ),
     ),
+    ComponentKind(
+        name="area_chart",
+        # Static placeholder for now -- Qwen doesn't return real area data yet,
+        # just picks this kind like any other (see README known gaps).
+        description="An area chart icon (a line chart with the area under it filled in). Static placeholder for now, not real data.",
+        examples=[
+            "create an area chart",
+            "add an area chart",
+            "make an area chart",
+            "draw an area chart",
+            "I want an area chart",
+            "I need an area chart",
+            "give me an area chart",
+            "can you create an area chart",
+            "can you make an area chart",
+            "let's create an area chart",
+            "let's make an area chart",
+            "I want to create an area chart",
+            "I want to make an area chart",
+            "put an area chart here",
+            "put an area chart on the screen",
+            "add a filled line chart",
+            "create a filled line chart",
+            "make a filled line chart",
+            "I want a chart with the area filled in",
+            "give me an area graph",
+            "add an area graph",
+            "create an area graph",
+            "make a chart with a filled line",
+            "I want a chart showing a filled trend",
+            "make it an area chart",
+        ],
+        svg=(
+            '<polygon points="2,68 17,33 34,88 50,38 67,58 85,12 98,47 98,97 2,97" '
+            'fill="currentColor" fill-opacity="0.35"/>'
+            '<polyline points="2,68 17,33 34,88 50,38 67,58 85,12 98,47" '
+            'fill="none" stroke="currentColor" stroke-width="4" '
+            'stroke-linecap="round" stroke-linejoin="round"/>'
+        ),
+    ),
+    ComponentKind(
+        name="pie_chart",
+        # Static placeholder for now -- Qwen doesn't return real pie data yet,
+        # just picks this kind like any other (see README known gaps).
+        description="A pie chart icon. Static placeholder for now, not real data.",
+        examples=[
+            "create a pie chart",
+            "add a pie chart",
+            "make a pie chart",
+            "draw a pie chart",
+            "I want a pie chart",
+            "I need a pie chart",
+            "give me a pie chart",
+            "can you create a pie chart",
+            "can you make a pie chart",
+            "let's create a pie chart",
+            "let's make a pie chart",
+            "I want to create a pie chart",
+            "I want to make a pie chart",
+            "put a pie chart here",
+            "put a pie chart on the screen",
+            "add a pie graph",
+            "create a pie graph",
+            "make a pie graph",
+            "I want a pie graph",
+            "give me a pie graph",
+            "add a circle chart",
+            "create a chart with slices",
+            "make a chart with slices",
+            "I want a chart showing proportions",
+            "make it a pie chart",
+        ],
+        svg=(
+            '<circle cx="50" cy="50" r="48" fill="none" stroke="currentColor" '
+            'stroke-width="4"/>'
+            '<path d="M50,50 L50,2 A48,48 0 0,1 98,50 Z" fill="currentColor"/>'
+        ),
+    ),
 ]
 
 _BY_NAME = {k.name: k for k in COMPONENT_KINDS}

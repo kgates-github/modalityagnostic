@@ -27,6 +27,15 @@ final class SpeechTranscriberSource: TranscriptSource, @unchecked Sendable {
     private var task: Task<Void, Never>?
     private var analyzer: SpeechAnalyzer?
     private var captureProvider: CaptureInputSequenceProvider?
+    // AVCaptureSession reports disruptions (format renegotiation, a route
+    // taken over by another process, the device going briefly unavailable --
+    // all common with Bluetooth HFP) via NotificationCenter, not thrown
+    // errors or anything visible in transcriber.results. Without observing
+    // these, a session that silently stops delivering audio mid-run looks
+    // identical to one that's working fine: "listening" was logged, nothing
+    // threw, and the loop just never produces another result -- exactly
+    // what a Bluetooth-mic-produces-nothing report with no error looks like.
+    private var notificationObservers: [NSObjectProtocol] = []
 
     // stop() tears a session down via an unawaited background Task (it has
     // to finalize() before it can cancel -- see stop() below), so a NEW
@@ -61,6 +70,14 @@ final class SpeechTranscriberSource: TranscriptSource, @unchecked Sendable {
                     onEvent("error", "no audio input device")
                     return
                 }
+                // Diagnostic: which device/format actually got picked, so a
+                // "this app doesn't hear me" report (e.g. a Bluetooth mic
+                // that works fine in other apps) can be distinguished from
+                // "picked the wrong device" vs "picked the right device but
+                // something about its format/profile isn't working" without
+                // guessing.
+                onEvent("status", "mic: \(device.localizedName) [\(device.uniqueID)]")
+                onEvent("status", "format: \(device.activeFormat.formatDescription)")
 
                 let analyzer = SpeechAnalyzer(modules: [transcriber])
                 self.analyzer = analyzer
@@ -70,9 +87,32 @@ final class SpeechTranscriberSource: TranscriptSource, @unchecked Sendable {
                 )
                 self.captureProvider = provider
 
+                let session = provider.captureSession
+                notificationObservers = [
+                    NotificationCenter.default.addObserver(
+                        forName: AVCaptureSession.runtimeErrorNotification, object: session, queue: nil
+                    ) { note in
+                        let error = note.userInfo?[AVCaptureSessionErrorKey] as? NSError
+                        onEvent("error", "capture session runtime error: \(error?.localizedDescription ?? "unknown")")
+                    },
+                    // No AVCaptureSessionInterruptionReasonKey on macOS (that's
+                    // iOS/tvOS/visionOS only) -- just logging that it happened
+                    // at all is already the useful signal here.
+                    NotificationCenter.default.addObserver(
+                        forName: AVCaptureSession.wasInterruptedNotification, object: session, queue: nil
+                    ) { _ in
+                        onEvent("status", "capture session interrupted")
+                    },
+                    NotificationCenter.default.addObserver(
+                        forName: AVCaptureSession.interruptionEndedNotification, object: session, queue: nil
+                    ) { _ in
+                        onEvent("status", "capture session interruption ended")
+                    },
+                ]
+
                 try await analyzer.start(inputSequence: provider.analyzerInputs)
                 provider.captureSession.startRunning()
-                onEvent("status", "listening")
+                onEvent("status", "listening (session running: \(provider.captureSession.isRunning))")
 
                 for try await result in transcriber.results {
                     if Task.isCancelled || myGeneration != generation { break }
@@ -108,6 +148,10 @@ final class SpeechTranscriberSource: TranscriptSource, @unchecked Sendable {
         // start() checks Task.isCancelled and breaks immediately, which
         // would beat finalize to the punch and drop the result it's about to
         // produce.
+        for observer in notificationObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        notificationObservers.removeAll()
         captureProvider?.captureSession.stopRunning()
         captureProvider = nil
         let analyzerToStop = analyzer

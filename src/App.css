@@ -66,7 +66,7 @@ pre {
 @keyframes shimmer-pulse {
   0%,
   100% {
-    opacity: 0.7;
+    opacity: 0.5;
   }
   50% {
     opacity: 0.9;
@@ -74,7 +74,7 @@ pre {
 }
 
 .shimmer {
-  animation: shimmer-pulse 500ms ease-in-out infinite;
+  animation: shimmer-pulse 400ms ease-in-out infinite;
 }
 
 /* The one bounding-box look — shown on the focused widget (or the drag
@@ -124,6 +124,7 @@ pre {
 
 .widget-flag {
   min-height: 24px;
+  min-width: 150px;
   padding: 4px 8px;
   display: flex;
   align-items: center;

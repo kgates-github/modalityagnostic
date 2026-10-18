@@ -106,6 +106,14 @@ export default function App() {
   // Which widget belongs to the current drag — persists across the whole drag
   // (unlike pendingWidgetIdRef, which onAction clears once generation finishes).
   const dragWidgetIdRef = useRef<number | null>(null);
+  // Leftover from when stub creation was lazy (deferred to the first speech
+  // event) -- endDragAndOpenDialog's own fallback branch still references
+  // it, but createDragStub now creates the widget eagerly and synchronously
+  // at mousedown/keydown, so that fallback (and this handoff) should no
+  // longer actually trigger. Left in place as a defensive no-op rather than
+  // ripped out, since removing it isn't needed to fix the bug it used to
+  // paper over.
+  const pendingDragWidgetIdRef = useRef<number | null>(null);
   // Starts a drag's background pipeline at most once, however many times
   // Option gets pressed/released during that drag.
   const pipelineStartedRef = useRef(false);
@@ -152,13 +160,6 @@ export default function App() {
   // old session physically can't reach a newer one's handler -- it isn't
   // registered anymore by the time that event shows up.
   const currentSpeechUnsubscribeRef = useRef<(() => void) | null>(null);
-  // Same reason: the speech-event effect needs the drag's start point to
-  // lazily place the stub at the right spot on first speech, without
-  // re-subscribing every time the mouse moves.
-  const dragStartRef = useRef<Point | null>(null);
-  useEffect(() => {
-    dragStartRef.current = dragStart;
-  }, [dragStart]);
   // Per-widget chat history ("pink circle" then "make it green" -> green
   // circle, not a fresh guess). Never cleared mid-session; a widget's id is
   // never reused, so there's nothing to clear it for.
@@ -202,13 +203,16 @@ export default function App() {
       if (e.key !== "Alt") return;
       setOptionDown(e.altKey);
       if (e.altKey) {
-        if (dragStart != null) maybeStartPipeline();
-        // Deliberately not (re)binding a speech session here: Option can go
-        // down/up repeatedly without a new bounding box appearing (e.g.
-        // re-editing the same open dialog), and that has to keep targeting
-        // the same widget -- the session already bound by that box's own
-        // mousedown (bindFreshDragSession) is still live and still correct.
-        // Only a new drag (handleCanvasMouseDown) ever binds a new one.
+        if (dragStart != null) {
+          maybeStartPipeline();
+          // Covers Option pressed mid-drag (mouse already down without it).
+          // createDragStub is idempotent -- if Option was already held at
+          // mousedown, the stub exists already and this is a no-op, so
+          // repeatedly letting go and re-pressing Option (e.g. re-editing an
+          // already-open dialog) keeps targeting the same widget, same as
+          // before.
+          createDragStub(dragStart);
+        }
         startListening().catch(() => {});
       } else {
         stopListening().catch(() => {});
@@ -226,11 +230,12 @@ export default function App() {
   /** Subscribes to onSpeechEvent for exactly one "speech session," replacing
    * (unsubscribing) whatever session was live before. `resolveTarget` is
    * called once per event to get the widget id this session targets --
-   * for a fresh drag it's a closure that lazily creates the stub on first
-   * call and remembers it after (see bindFreshDragSession); for everything
-   * else it's typically just `() => someFixedId`. Because the target comes
-   * from THIS closure, not a shared mutable ref read at event time, a later
-   * session can never hijack an earlier one's still-arriving events -- once
+   * for a fresh drag it's always `() => id`, a fixed id (see createDragStub,
+   * which creates the widget and binds this in the same breath); for
+   * everything else it's typically `() => someFixedId` too, or `() => null`
+   * for the idle/no-target case. Because the target comes from THIS
+   * closure, not a shared mutable ref read at event time, a later session
+   * can never hijack an earlier one's still-arriving events -- once
    * replaced, the old closure simply isn't registered with onSpeechEvent
    * anymore. */
   function bindSpeechSession(resolveTarget: () => number | null) {
@@ -266,57 +271,64 @@ export default function App() {
         classify(`Create a ${text}`)
           .then(({ result }) => {
             const type = widgetTypeFromResult(result);
-            if (type) setWidgets((ss) => ss.map((s) => (s.id === targetId ? { ...s, type } : s)));
+            if (type) {
+              setWidgets((ss) => ss.map((s) => (s.id === targetId ? { ...s, type, typeGuessed: true } : s)));
+            }
           })
           .catch(() => {});
       } else {
         // A still-running resolution for this widget is stale the moment a
-        // new command actually arrives — kill it and drop back to
-        // unresolved (gray, still shimmering) rather than risk a stale
-        // answer landing after this newer one.
-        if (cancelPendingFor(targetId)) {
-          setWidgets((ss) => ss.map((s) => (s.id === targetId ? { ...s, color: undefined } : s)));
-        }
+        // new command actually arrives — kill it. Keep whatever it's
+        // currently showing (its last resolved shape/color, or blank if it
+        // never had one) rather than clearing color here: that used to just
+        // regray the existing shape, but now that an unresolved widget shows
+        // no shape at all (see Widget.tsx), clearing it made an
+        // already-resolved widget's shape vanish the instant a new edit
+        // started, not just while it's genuinely blank. Shimmer (still on
+        // while dictating) already signals "this might change".
+        cancelPendingFor(targetId);
         enqueueStream(text, { targetId });
       }
     });
   }
 
-  /** Binds a fresh session for a brand-new bounding box: nothing exists yet,
-   * so the stub is created lazily on this session's own first speech event
-   * (we don't show one until there's something to show), then remembered
-   * for the rest of this session's lifetime via the `boundId` closure --
-   * not dragWidgetIdRef, which other drags will go on to overwrite. */
-  function bindFreshDragSession() {
-    let boundId: number | null = null;
-    bindSpeechSession(() => {
-      if (boundId == null) {
-        const start = dragStartRef.current;
-        if (!start) return null;
-        boundId = Date.now();
-        dragWidgetIdRef.current = boundId; // still maintained for position-tracking/shimmer elsewhere
-        // Logged here (not at the actual mousedown) because that's when this
-        // widget's id first exists to attach a log line to -- the two happen
-        // within the same user gesture, so the few ms of lag is negligible
-        // for the Gantt chart this feeds.
-        logEvent(boundId, "lifecycle", "mousedown");
-        // Clear the status/output panel now, not just when a command actually
-        // starts (runStreamNow already does that) -- otherwise it keeps
-        // showing the PREVIOUS widget's "Working..."/result for however long
-        // this one sits waiting on its own first final, which reads as this
-        // box being stuck when it's really just not resolved yet.
-        setCommandStatus("");
-        setOutput("");
-        setAction(null);
-        const rect = computeRect(start, dragCurrentRef.current ?? start);
-        setWidgets((ss) => [
-          ...ss,
-          { id: boundId!, type: "rectangle", position: { x: rect.x, y: rect.y }, width: rect.width, height: rect.height },
-        ]);
-        setFocusedId(boundId);
-      }
-      return boundId;
-    });
+  /** Creates this drag's widget stub immediately -- not lazily, deferred
+   * until the first speech event lands. Stubs are the core feedback loop of
+   * this app: the box has to be visibly there the instant dictation starts,
+   * full stop, not conditionally once enough text (or enough drag distance)
+   * has accumulated. That lazy design was also the root of a whole class of
+   * bugs: a fast utterance's only speech event could arrive after mouseup
+   * had already cleared drag state (nothing to anchor to -> fell through to
+   * a stray, centered widget), and endDragAndOpenDialog's own fallback
+   * creation (for "mouse came up before speech ever landed") could race
+   * against this same lazy creation and produce two overlapping, duplicate
+   * widgets. Creating it eagerly, synchronously, right here removes both
+   * races by construction -- there's only one creation point now.
+   *
+   * Idempotent via the dragWidgetIdRef guard, so it's safe to call from
+   * both triggers: Option already held at mousedown (handleCanvasMouseDown),
+   * or pressed mid-drag (handleKey) -- whichever happens first wins, the
+   * other is a no-op. */
+  function createDragStub(start: Point) {
+    if (dragWidgetIdRef.current != null) return;
+    const id = Date.now();
+    dragWidgetIdRef.current = id;
+    logEvent(id, "lifecycle", "mousedown");
+    // Clear the status/output panel now, not just when a command actually
+    // starts (runStreamNow already does that) -- otherwise it keeps showing
+    // the PREVIOUS widget's "Working..."/result for however long this one
+    // sits waiting on its own first final, which reads as this box being
+    // stuck when it's really just not resolved yet.
+    setCommandStatus("");
+    setOutput("");
+    setAction(null);
+    const rect = computeRect(start, dragCurrentRef.current ?? start);
+    setWidgets((ss) => [
+      ...ss,
+      { id, type: "rectangle", position: { x: rect.x, y: rect.y }, width: rect.width, height: rect.height },
+    ]);
+    setFocusedId(id);
+    bindSpeechSession(() => id);
   }
 
   // Idle default until the first bounding box ever appears -- see
@@ -468,9 +480,7 @@ export default function App() {
           const id = opts.targetId;
           pendingWidgetIdRef.current = id;
           setWidgets((ss) =>
-            ss.map((s) =>
-              s.id === id ? { ...s, ...(type ? { type } : {}), inputText: text, streamText: "", color: undefined } : s
-            )
+            ss.map((s) => (s.id === id ? { ...s, ...(type ? { type } : {}), inputText: text, streamText: "" } : s))
           );
         } else {
           // Brand-new widget: always create something, even if the cheap
@@ -592,6 +602,7 @@ export default function App() {
       // falls through to the plain prompt-field path and the widget ends up
       // randomly placed instead of in this box.
       widgetId = Date.now();
+      pendingDragWidgetIdRef.current = widgetId;
       setWidgets((ss) => [
         ...ss,
         { id: widgetId!, type: "rectangle", position: { x: rect.x, y: rect.y }, width: rect.width, height: rect.height },
@@ -605,6 +616,13 @@ export default function App() {
     // to creating a stray new widget instead of updating this one.
     dialogWidgetIdRef.current = widgetId;
     setDialogWidgetId(widgetId);
+    // The fallback branch above never focuses the widget it creates (unlike
+    // the speech-driven lazy creation, which does) -- unfocused means no
+    // frame, and now that an unresolved widget also has no shape to show
+    // (see Widget.tsx), that left nothing visible at all where the user
+    // just dragged: just the dialog, floating with no box anchoring it.
+    // Idempotent for the already-focused case (speech beat the mouse up).
+    if (widgetId != null) setFocusedId(widgetId);
     setDialogDraft(pipelineWasStarted ? dragInputTextRef.current : "");
     setDialogRect(rect);
     setDialogOpen(true);
@@ -668,34 +686,39 @@ export default function App() {
   function handleCanvasMouseDown(e: React.MouseEvent<HTMLDivElement>) {
     if (e.target !== e.currentTarget) return; // clicked a widget, not empty canvas
     setFocusedId(null); // clicking empty canvas deselects everything
-    // A new bounding box is the one thing that moves speech's focus (even if
-    // Option's been held continuously since the last drag, with no keyup in
-    // between) -- bind a fresh session so further speech targets THIS box,
-    // not whatever the previous one was.
     const rect = canvasRef.current!.getBoundingClientRect();
     const point = { x: e.clientX - rect.left, y: e.clientY - rect.top };
-    // Set synchronously, not just via setDragStart -- its mirroring effect
-    // (see dragStartRef's declaration) only runs after this render commits.
-    // bindFreshDragSession's lazy stub-creation reads this ref on the very
-    // first speech event, which can easily arrive before that effect catches
-    // up; finding it still null made it bail out and fall through to "no
-    // widget" (confirmed in the logs: many calls landing with widget_id
-    // null). Has to be current before the session is even bound.
-    dragStartRef.current = point;
-    bindFreshDragSession();
+    // A new bounding box is the one thing that moves speech's focus (even if
+    // Option's been held continuously since the last drag, with no keyup in
+    // between). Reset before anything below can read a leftover value from
+    // the PREVIOUS drag -- dragCurrentRef in particular feeds straight into
+    // createDragStub's own rect calculation below.
+    dragWidgetIdRef.current = null;
+    pendingDragWidgetIdRef.current = null;
+    dragCurrentRef.current = point;
     setDragStart(point);
     setDragCurrent(point);
     if (e.altKey) {
       maybeStartPipeline();
+      // Stub created right here, synchronously, not deferred to the first
+      // speech event -- see createDragStub's own comment for why. This also
+      // binds the speech session for the drag (createDragStub's last line),
+      // so further speech targets THIS box, not whatever the previous one
+      // was.
+      createDragStub(point);
       // NOT restarting the mic here (used to stop+start it to force a clean
       // transcript per box) -- that's async and takes real time to tear down
       // and recreate actual mic capture, and speaking the instant you mouse
       // down (the normal way to use this) could land mid-restart and get
-      // lost entirely. bindFreshDragSession above already solves the part
-      // that actually matters: which widget this speech is bound to. Text
+      // lost entirely. createDragStub above already solves the part that
+      // actually matters: which widget this speech is bound to. Text
       // possibly still carrying over from a prior box within one continuous
       // Option-hold is a smaller, separate problem -- not worth risking
       // losing speech outright to fix preemptively.
+    } else {
+      // Plain drag, no dictation -- still rebind to idle so a stray trailing
+      // event from an older session can't land on a non-existent target.
+      bindSpeechSession(() => null);
     }
   }
 
@@ -781,9 +804,9 @@ export default function App() {
       // A resolution still running from the drag (or an earlier Generate)
       // is now superseded by this click -- kill it rather than let it queue
       // behind and land after the new one, same rule as new speech arriving.
-      if (cancelPendingFor(dialogWidgetId)) {
-        setWidgets((ss) => ss.map((s) => (s.id === dialogWidgetId ? { ...s, color: undefined } : s)));
-      }
+      // Don't clear color here either -- see the matching comment up in
+      // bindSpeechSession's final-event branch.
+      cancelPendingFor(dialogWidgetId);
       enqueueStream(text, { targetId: dialogWidgetId });
     } else if (dialogRect) {
       dialogQueueIdRef.current = enqueueStream(text, {
@@ -804,7 +827,7 @@ export default function App() {
       style={{
         display: "flex",
         flexDirection: "column",
-        border: optionDown ? "20px solid #3b7dd8" : "20px solid transparent",
+        border: optionDown ? "20px solid #ccc" : "20px solid transparent",
       }}
     >
       {/*<h1>Probablistic System Feedback</h1>*/}
@@ -829,6 +852,8 @@ export default function App() {
             }
             inputText={s.inputText}
             streamText={s.streamText}
+            typeGuessed={s.typeGuessed}
+            optionDown={optionDown}
           />
         ))}
         {/* Once a stub exists for this drag, its own frame already shows a box
@@ -837,8 +862,18 @@ export default function App() {
             speech has actually arrived -- immediate confirmation that this
             box IS capturing dictation, rather than silence that looks the
             same whether it's about to work or has already failed. */}
+        {/* Gray while listening with nothing heard yet, so it's clear the app
+            noticed Option is down but hasn't picked up any speech -- the
+            moment the first word lands, dragWidgetIdRef flips non-null, this
+            marquee is replaced by the real widget's frame (blue, same as
+            always), so the color change itself IS the "heard you" signal. */}
         {dragRect && dragWidgetIdRef.current == null && (
-          <SelectionRect {...dragRect} flagText={optionDown ? "Listening..." : undefined} />
+          <SelectionRect
+            {...dragRect}
+            flagText={optionDown ? "Listening..." : undefined}
+            borderColor={optionDown ? "#aaaaaa" : undefined}
+            borderStyle={optionDown ? "dashed" : undefined}
+          />
         )}
         {/* Blank-dialog case (plain drag, no Option) — nothing exists at the
             drawn spot yet, so anchor the dialog with a placeholder box until

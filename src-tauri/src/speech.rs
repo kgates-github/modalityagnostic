@@ -43,6 +43,11 @@ pub fn spawn(app: &AppHandle) -> Result<(), String> {
     let app_handle = app.clone();
     thread::spawn(move || {
         for line in BufReader::new(stdout).lines().flatten() {
+            // "status"/"error" lines (e.g. the mic device/format diagnostic)
+            // aren't acted on by the frontend (it only reacts to
+            // volatile/final), so they'd otherwise go nowhere visible --
+            // print them here so they show up in this terminal.
+            println!("[speech] {line}");
             let _ = app_handle.emit("speech-event", line);
         }
     });
