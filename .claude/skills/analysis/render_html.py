@@ -25,6 +25,8 @@ LEGEND = [
     ("final", "Final text"),
     ("classify", "Transformer classification"),
     ("qwen", "Local tool call"),
+    ("frontier", "Frontier answer"),
+    ("frontier_check", "Frontier verify"),
 ]
 
 COLORS = {
@@ -34,7 +36,21 @@ COLORS = {
     "classify": "#e0a13b",
     "qwen": "#9b6fe0",
     "escalate": "#e05a5a",
+    "frontier": "#2dd4bf",
+    "frontier_check": "#c77dff",
 }
+
+# Every bar/tick position is `calc(ms * var(--px-per-ms) * 1px)` against this
+# ONE shared custom property (declared on <main>) instead of a percentage of
+# the slowest widget -- the window <select> just does
+# main.style.setProperty("--px-per-ms", ...) and every element's calc()
+# recomputes for free via the normal CSS cascade. BASE_WIDTH_PX is the
+# reference width "Full" divides max_total into (matches the old fixed
+# min-width:600px bar-track/events-col used to have, so "Full" looks like
+# today's output). The window <select>'s options are literal ms values this
+# same formula applies to.
+BASE_WIDTH_PX = 600
+WINDOW_OPTIONS_MS = [5000, 2000, 1000, 500, 250]
 
 
 def esc(s: str) -> str:
@@ -59,6 +75,45 @@ def nice_step(span: float, target_ticks: int = 10) -> float:
 def render(data: dict) -> str:
     widgets = data["widgets"]
     max_total = max((w["total_ms"] for w in widgets), default=1.0) or 1.0
+    default_px_per_ms = BASE_WIDTH_PX / max_total
+
+    # 60000px ceiling: a stale/abandoned widget's total_ms can be enormous
+    # (hours, if its log just never got a closing event) -- uncapped, the
+    # most zoomed-in window would multiply that out to tens of millions of
+    # px, right at the edge of what WebKit lays out reliably. 60000px is
+    # already far more horizontal scroll than anyone would actually use
+    # (at the tightest zoom, ≤250ms, that's 25s of timeline); an outlier
+    # far past it just doesn't get fully reachable by scroll, same as it
+    # wasn't especially readable at that width anyway. Applied to every
+    # single position/width calc(), not just container widths -- a
+    # container's own width can be capped and still get silently stretched
+    # back out by an UNCAPPED child (e.g. a late step's margin-left),
+    # since nothing here clips overflow.
+    def pos_css(ms: float) -> str:
+        return f"min(60000px, calc({ms:.3f} * var(--px-per-ms) * 1px))"
+
+    # Capping left and width SEPARATELY (each min(60000px, ...) on its own)
+    # isn't enough -- a segment positioned right at the 60000px cap with its
+    # OWN width also independently capped at 60000px visually extends to
+    # 120000px (left+width), silently stretching the "capped" container
+    # right back out via overflow (confirmed: a row's scrollWidth came back
+    # at exactly double the cap). Capping each EDGE (start and start+dur)
+    # independently and taking their difference guarantees the right edge
+    # itself never exceeds the cap, by construction.
+    def width_css(start_ms: float, duration_ms: float, floor_px: int) -> str:
+        end_ms = start_ms + duration_ms
+        left = f"min(60000px, calc({start_ms:.3f} * var(--px-per-ms) * 1px))"
+        right = f"min(60000px, calc({end_ms:.3f} * var(--px-per-ms) * 1px))"
+        return f"max({floor_px}px, calc({right} - {left}))"
+
+    # Every row's track + the ruler share this one width so they stay
+    # aligned at any zoom level -- same formula as every bar's own calc(),
+    # just against the GLOBAL max_total rather than one segment's duration.
+    track_width_css = width_css(0, max_total, 600)
+    window_options_html = f'<option value="{max_total:.3f}" selected>Full</option>' + "".join(
+        f'<option value="{ms}">≤{ms / 1000:g}s</option>' if ms >= 1000 else f'<option value="{ms}">≤{ms:g}ms</option>'
+        for ms in WINDOW_OPTIONS_MS
+    )
     # </script in an SVG string would otherwise prematurely close the real
     # <script> tag this gets embedded in below.
     svg_stubs_json = json.dumps(SVG_STUBS).replace("</script", "<\\/script")
@@ -80,7 +135,7 @@ def render(data: dict) -> str:
     tick_values.append(max_total)
     ruler_ticks_html = "".join(
         f'<span class="tick{" tick-last" if tv == tick_values[-1] else ""}" '
-        f'style="left:{tv / max_total * 100:.3f}%">{int(round(tv))}</span>'
+        f'style="left:{pos_css(tv)}">{int(round(tv))}</span>'
         for tv in tick_values
     )
     rows_html = []
@@ -102,8 +157,8 @@ def render(data: dict) -> str:
         def state_seg_html(seg: dict) -> str:
             source = seg.get("source") or {}
             return (
-                f'<span class="state-seg" style="left:{seg["start_ms"] / max_total * 100:.3f}%;'
-                f'width:max({seg["duration_ms"] / max_total * 100:.3f}%, 3px)" '
+                f'<span class="state-seg" style="left:{pos_css(seg["start_ms"])};'
+                f'width:{width_css(seg["start_ms"], seg["duration_ms"], 3)}" '
                 f'onclick="pinStatePreview(this)" '
                 f'data-type="{esc(seg["type"] or "")}" data-color="{esc(seg["color"] or "")}" '
                 f'data-size="{seg["size"] or ""}" data-escalated="{str(bool(seg["escalated"])).lower()}" '
@@ -123,8 +178,8 @@ def render(data: dict) -> str:
         # exists to surface.
         collapsed_segs = "".join(
             f'<span class="seg{" seg-cancelled" if seg.get("cancelled") else ""}" '
-            f'style="left:{seg["start_ms"] / max_total * 100:.3f}%;'
-            f'width:max({seg["duration_ms"] / max_total * 100:.3f}%, 2px);'
+            f'style="left:{pos_css(seg["start_ms"])};'
+            f'width:{width_css(seg["start_ms"], seg["duration_ms"], 2)};'
             f'background:{seg["color"]}" title="{esc(seg["label"])}"></span>'
             for seg in w["segments"]
             if seg["kind"] != "event"
@@ -142,24 +197,24 @@ def render(data: dict) -> str:
         # regardless.
         step_rows = []
         for seg in w["segments"]:
-            indent_pct = seg["start_ms"] / max_total * 100
+            indent_css = pos_css(seg["start_ms"])
             if seg["kind"] == "event":
                 step_rows.append(
-                    f'<div class="step" style="margin-left:{indent_pct:.2f}%">'
+                    f'<div class="step" style="margin-left:{indent_css}">'
                     f'<span class="event-dot" style="background:{seg["color"]}"></span>'
                     f'<span class="step-label event-label">{esc(seg["label"])} '
                     f'<span class="step-ms">· {seg["start_ms"]:.0f}ms</span></span></div>'
                 )
             else:
-                bar_width = max(seg["duration_ms"] / max_total * 100, 1.5)
+                bar_width_css = width_css(seg["start_ms"], seg["duration_ms"], 6)
                 cancelled = seg.get("cancelled")
                 cancel_mark = '<span class="cancel-mark">×</span>' if cancelled else ""
                 bar_class = "step-bar step-bar-cancelled" if cancelled else "step-bar"
                 label_class = "step-label step-label-cancelled" if cancelled else "step-label"
                 step_rows.append(
-                    f'<div class="step" style="margin-left:{indent_pct:.2f}%">'
+                    f'<div class="step" style="margin-left:{indent_css}">'
                     f'{cancel_mark}'
-                    f'<span class="{bar_class}" style="width:{bar_width:.2f}%;background:{seg["color"]}"></span>'
+                    f'<span class="{bar_class}" style="width:{bar_width_css};background:{seg["color"]}"></span>'
                     f'<span class="{label_class}">{esc(seg["label"])} '
                     f'<span class="step-ms">· {seg["start_ms"]:.0f}ms, +{seg["duration_ms"]:.0f}ms</span></span></div>'
                 )
@@ -179,7 +234,7 @@ def render(data: dict) -> str:
       <span class="row-label">{label}</span>
     </div>
     <div class="row-collapsed">
-      <div class="bar-track">{collapsed_segs}</div>
+      <div class="bar-track" style="width:{track_width_css}">{collapsed_segs}</div>
     </div>
   </div>
   <div class="row-expanded" hidden>
@@ -187,7 +242,7 @@ def render(data: dict) -> str:
       <div class="detail-line widget-id">{wid}</div>
       {action_html}
     </div>
-    <div class="steps-col" onmousemove="updateGuideline(event, this)" onmouseleave="hideGuideline(this)">
+    <div class="steps-col" style="min-width:{track_width_css}" onmousemove="updateGuideline(event, this)" onmouseleave="hideGuideline(this)">
       <div class="guideline" hidden></div>
       {state_row_html}
       {steps_html}
@@ -212,6 +267,9 @@ def render(data: dict) -> str:
     padding: 14px 20px;
     border-bottom: 1px solid #1c2128;
     background: #0d1117;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
   }}
   header .tab {{
     font-size: 13px;
@@ -220,29 +278,70 @@ def render(data: dict) -> str:
     padding-bottom: 10px;
     display: inline-block;
   }}
-  main {{ padding: 24px 20px 60px; max-width: 100%; overflow-x: auto; }}
+  main {{ padding: 24px 20px 60px; max-width: 100%; }}
+  /* The ONE horizontal scroll surface -- deliberately NOT on main itself
+     (that would drag the title/legend out of view along with the table the
+     moment a row got wider than the viewport, confirmed: scrolling main
+     scrolled the h1 off-screen too, since it's just another block child
+     with no sticky positioning of its own). Scoped to table-head + rows
+     only, so the title/legend stay put and only the data scrolls. */
+  .gantt-scroll {{ overflow-x: auto; }}
+  .window-select {{
+    background: #0d1117;
+    color: #c9d1d9;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-family: inherit;
+    font-size: 12px;
+  }}
   h1 {{ font-size: 14px; font-weight: 700; margin: 0 0 18px; }}
   .legend {{ display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 28px; font-size: 12px; color: #8b949e; }}
   .legend-item {{ display: flex; align-items: center; gap: 6px; }}
   .dot {{ width: 8px; height: 8px; border-radius: 50%; display: inline-block; }}
   .table-head {{
     display: flex;
+    /* A plain block box's width:auto fills its CONTAINING block (here,
+       .gantt-scroll's own viewport width), full stop -- it doesn't grow to
+       fit an overflowing child the way a flex/inline-block box would, even
+       though the child (events-col, min-width set inline) visually
+       overflows past it regardless. That left col-id's sticky containing
+       block only as wide as the viewport itself, so it ran out of room
+       and scrolled away almost immediately (confirmed: its rect went
+       negative well before the row's real content did). max-content makes
+       this box's own layout extent match its widest child for real,
+       which is what sticky needs to stay pinned for the whole scroll. */
+    width: max-content;
     padding: 8px 0;
     border-bottom: 1px solid #1c2128;
     color: #8b949e;
     font-size: 12px;
     margin-bottom: 4px;
   }}
-  .table-head .col-id {{ width: 280px; flex-shrink: 0; }}
-  /* Same flex:1 + min-width as row-collapsed/steps-col below, with NO gap
-     before it (table-head has none either) -- so the ruler's percentage
-     positions land in the exact same pixel coordinates as the bars. */
-  .events-col {{ position: relative; flex: 1; min-width: 600px; height: 16px; }}
+  /* Sticky, not just a fixed column -- row-header/detail-col below get the
+     same treatment. Once a row's track can be wider than the viewport
+     (zoomed in on a slow widget), the PAGE scrolls horizontally (main's own
+     overflow-x: auto) rather than each row scrolling independently, so
+     without this the widget-id labels would scroll out of view along with
+     everything else, and you'd lose track of which row is which. */
+  .table-head .col-id {{
+    width: 280px;
+    flex-shrink: 0;
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    background: #0a0e14;
+  }}
+  /* Width set inline per-render (track_width_css) -- same formula every
+     bar-track/steps-col uses, so the ruler stays aligned with the bars
+     below it at any zoom level. */
+  .events-col {{ position: relative; flex: 1; height: 16px; }}
   .col-events-label {{ position: relative; z-index: 1; }}
   .ruler {{ position: absolute; inset: 0; }}
   .tick {{ position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }}
   .tick-last {{ transform: translateX(-100%); }}
-  .row-top {{ display: flex; align-items: center; }}
+  /* width: max-content -- see .table-head's comment, same reason. */
+  .row-top {{ display: flex; align-items: center; width: max-content; }}
   .row-header {{
     display: flex;
     align-items: center;
@@ -253,13 +352,19 @@ def render(data: dict) -> str:
     cursor: pointer;
     user-select: none;
     overflow: hidden;
+    /* See .table-head .col-id's comment -- same reason. */
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    background: #0a0e14;
   }}
   .chevron {{ display: inline-block; transition: transform 120ms ease; color: #8b949e; width: 10px; flex-shrink: 0; }}
   .row.expanded .chevron {{ transform: rotate(90deg); }}
   .row-label {{ color: #c9d1d9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
   .row-collapsed {{ display: flex; align-items: center; flex: 1; min-width: 0; }}
   .row.expanded .row-collapsed {{ display: none; }}
-  .bar-track {{ position: relative; height: 10px; width: 100%; min-width: 600px; border-radius: 2px; background: #161b22; }}
+  /* Width set inline per-render (track_width_css) -- see .events-col. */
+  .bar-track {{ position: relative; height: 10px; border-radius: 2px; background: #161b22; }}
   .seg {{ position: absolute; top: 0; height: 100%; border-radius: 1px; }}
   /* No gap -- table-head (col-id + events-col) has none either, so
      steps-col gets the exact same available width as events-col, and their
@@ -267,30 +372,33 @@ def render(data: dict) -> str:
      24px used to give is replaced with padding-right on detail-col, which
      (box-sizing: border-box) eats into its own 280px rather than adding to
      it, so it doesn't shift steps-col's width the way a flex gap would. */
-  .row-expanded {{ display: flex; padding: 4px 0 20px; }}
+  /* width: max-content -- see .table-head's comment, same reason. */
+  .row-expanded {{ display: flex; padding: 4px 0 20px; width: max-content; }}
   /* padding-left: 18px matches row-header's chevron (10px) + its gap (8px)
      -- the same horizontal offset the row LABEL text has, so this detail
      text lines up under "circle" rather than under the chevron. */
-  .detail-col {{ width: 280px; flex-shrink: 0; padding: 4px 24px 0 18px; }}
+  .detail-col {{
+    width: 280px;
+    flex-shrink: 0;
+    padding: 4px 24px 0 18px;
+    /* See .table-head .col-id's comment -- same reason. */
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    background: #0a0e14;
+  }}
   .detail-line {{ color: #8b949e; font-size: 12px; padding: 1px 0; }}
   .widget-id {{ color: #6e7681; }}
-  /* A row's own nowrap step-label text was free to inflate this flex item
-     wider than another row's (e.g. a long "QWEN ... create_component ..."
-     label vs a short one) -- so the SAME percentage-based position landed
-     at a DIFFERENT pixel offset per row, visibly misaligning the repeated
-     ruler from one row to the next even though the underlying math was
-     identical. overflow-x pins this to its actual flex-allocated width
-     (content that doesn't fit scrolls within the row instead of growing
-     it), which is what makes every row's percentage scale agree in pixels. */
-  /* overflow-y: visible explicitly, not left to default -- setting only
-     overflow-x otherwise implicitly computes overflow-y as auto too (a
-     real CSS rule, not a guess: a non-visible value on one axis coerces
-     the other away from visible unless it's stated outright), which
-     CLIPPED the guideline-label the instant it extended above this
-     container's own top edge (confirmed: label's text wasn't rendering at
-     all, only a sliver of its border was, exactly what clipping at the
-     boundary looks like). */
-  .steps-col {{ position: relative; flex: 1; min-width: 500px; overflow-x: auto; overflow-y: visible; }}
+  /* Position is now calc(ms * var(--px-per-ms) * 1px) -- an absolute pixel
+     offset, not a percentage of this element's OWN width -- so a row with a
+     long step-label can no longer desync its scale from the ruler/other
+     rows the way it used to. min-width is set inline (track_width_css,
+     same formula events-col/bar-track use) so this row's track is exactly
+     as wide as every other row's, and overflow-x is deliberately left at
+     its default (visible): the PAGE (main's own overflow-x: auto) is the
+     one scroll surface now, not each row independently -- see the
+     sticky-column comment on .table-head .col-id for why that matters. */
+  .steps-col {{ position: relative; flex: 1; overflow-y: visible; }}
   /* Spans the full height of ONE row's own expanded content (state track +
      every step) via top/bottom: 0 against steps-col's own height -- never
      the whole page, and never more than one row at a time, since each
@@ -454,7 +562,12 @@ def render(data: dict) -> str:
     overflow-y: auto;
   }}
 </style>
-<header><span class="tab">Analysis</span></header>
+<header>
+  <span class="tab">Analysis</span>
+  <select class="window-select" onchange="setWindow(this.value)">
+    {window_options_html}
+  </select>
+</header>
 <div id="guideline-label" class="guideline-label" hidden></div>
 <div id="state-popup" class="state-popup" hidden>
   <button class="state-popup-close" onclick="hideStatePreview()">×</button>
@@ -471,14 +584,16 @@ def render(data: dict) -> str:
 <main>
   <h1>Intent Inference Analysis</h1>
   <div class="legend">{legend_html}</div>
-  <div class="table-head">
-    <span class="col-id">Widget ID</span>
-    <div class="events-col">
-      <span class="col-events-label">Events (in ms)</span>
-      <div class="ruler">{ruler_ticks_html}</div>
+  <div class="gantt-scroll" style="--px-per-ms:{default_px_per_ms:.8f}">
+    <div class="table-head">
+      <span class="col-id">Widget ID</span>
+      <div class="events-col" style="min-width:{track_width_css}">
+        <span class="col-events-label">Events (in ms)</span>
+        <div class="ruler">{ruler_ticks_html}</div>
+      </div>
     </div>
+    {"".join(rows_html)}
   </div>
-  {"".join(rows_html)}
 </main>
 <script>
 function toggleRow(headerEl) {{
@@ -502,19 +617,15 @@ let hoverEl = null;
 
 function updateGuideline(e, stepsCol) {{
   const rect = stepsCol.getBoundingClientRect();
-  // The bars/steps are positioned via left:X% of steps-col's OWN width
-  // (same basis getBoundingClientRect().width reports) -- but that's fixed
-  // in the content's own coordinate space, unaffected by scrolling. The
-  // cursor's position in the VIEWPORT (e.clientX - rect.left) only matches
-  // that content coordinate when scrollLeft is 0; once a row's scrolled
-  // (overflow-x: auto, long labels), it has to be added back in, or the
-  // guideline/preview silently drift from the mouse by however much has
-  // been scrolled (confirmed: a pinned preview showed a segment from well
-  // after the guideline's visible position once a row was scrolled).
-  const contentX = (e.clientX - rect.left) + stepsCol.scrollLeft;
-  const pct = Math.max(0, Math.min(100, (contentX / rect.width) * 100));
+  // Bars/steps are positioned via calc(ms * var(--px-per-ms) * 1px) now --
+  // an absolute pixel offset in the content's own coordinate space, not a
+  // percentage of stepsCol's rendered width. getBoundingClientRect()
+  // already accounts for every ancestor's scroll position (the PAGE is the
+  // one scroll surface now, not this row), so no manual scrollLeft
+  // adjustment is needed the way the old %-based version required.
+  const contentPx = Math.max(0, e.clientX - rect.left);
   const guideline = stepsCol.querySelector(".guideline");
-  guideline.style.left = pct + "%";
+  guideline.style.left = contentPx + "px";
   guideline.hidden = false;
   // Shared, fixed-position label (see CSS comment) -- positioned from the
   // active guideline's own viewport rect so it tracks the line exactly,
@@ -522,11 +633,12 @@ function updateGuideline(e, stepsCol) {{
   // steps-col's forced overflow-y: auto.
   const lineRect = guideline.getBoundingClientRect();
   const label = document.getElementById("guideline-label");
-  label.textContent = Math.round((pct / 100) * MAX_TOTAL_MS) + "ms";
+  const ms = Math.max(0, Math.min(MAX_TOTAL_MS, contentPx / currentPxPerMs));
+  label.textContent = Math.round(ms) + "ms";
   label.style.left = (lineRect.left + 2) + "px";
   label.style.top = (lineRect.top - 14) + "px";
   label.hidden = false;
-  const seg = findSegmentAt(stepsCol, pct);
+  const seg = findSegmentAt(stepsCol, contentPx);
   if (seg && seg !== hoverEl) {{
     if (hoverEl) hoverEl.classList.remove("hovering");
     hoverEl = seg;
@@ -541,12 +653,15 @@ function updateGuideline(e, stepsCol) {{
 // cursor's position is the state that was active there (a state persists
 // until the NEXT bar starts, it doesn't end when its own bar visually
 // does -- that width is just "until the next change", not "how long until
-// unknown again").
-function findSegmentAt(stepsCol, pct) {{
+// unknown again"). Compares against each segment's own data-start (ms),
+// converted to the SAME px scale the cursor position is in -- reading
+// seg.style.left back out wouldn't work now that it's a calc() string, not
+// a plain number.
+function findSegmentAt(stepsCol, contentPx) {{
   const segs = stepsCol.querySelectorAll(".state-seg");
   let found = null;
   for (const seg of segs) {{
-    if (parseFloat(seg.style.left) <= pct) found = seg;
+    if (parseFloat(seg.dataset.start) * currentPxPerMs <= contentPx) found = seg;
   }}
   return found;
 }}
@@ -566,9 +681,20 @@ function hideGuideline(stepsCol) {{
 // stays a single self-contained file with no dependency on the sidecar
 // actually running.
 const SVG_STUBS = {svg_stubs_json};
-// Same denominator every %-based position on this page is computed against
-// -- lets the guideline label convert its own position back into ms.
+// Upper bound for the guideline label's clamp -- the slowest widget's own
+// total, independent of whatever window is currently selected.
 const MAX_TOTAL_MS = {max_total:.3f};
+// Mirrors the --px-per-ms custom property on <main> (kept as a plain JS
+// number too, not just read back via getComputedStyle on every mousemove)
+// -- findSegmentAt/updateGuideline need it on every mousemove, and the
+// window <select> is the only thing that ever changes it.
+let currentPxPerMs = {default_px_per_ms:.8f};
+const BASE_WIDTH_PX = {BASE_WIDTH_PX};
+
+function setWindow(windowMsStr) {{
+  currentPxPerMs = BASE_WIDTH_PX / parseFloat(windowMsStr);
+  document.querySelector(".gantt-scroll").style.setProperty("--px-per-ms", currentPxPerMs);
+}}
 // Click "sticks" a segment as the base preview. Hovering ANY segment
 // (including others) shows that one instead, temporarily; moving the mouse
 // off reverts to the sticky one (not hidden) as long as one is set. Close

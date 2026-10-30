@@ -38,7 +38,11 @@ COLORS = {
     "final": "#5aa9e6",       # light blue: settled utterance
     "classify": "#e0a13b",    # orange: embedding classifier
     "qwen": "#9b6fe0",        # purple: local Qwen tool call
-    "escalate": "#e05a5a",    # red: escalated to frontier (no local resolution)
+    "escalate": "#e05a5a",    # red: old dead-stub "escalate" stage -- main.py
+                               # no longer emits this (see "frontier" below),
+                               # kept only so old log files still render.
+    "frontier": "#2dd4bf",    # teal: confident question, answered by the frontier
+    "frontier_check": "#c77dff",  # lavender: low-confidence verify-or-fallback check
 }
 
 MODEL_LABEL = {"small": "QWEN 0.8b", "big": "QWEN 4b"}
@@ -95,6 +99,10 @@ def build_segments(events: list[dict]) -> tuple[list[dict], float]:
             return f"{model} · cancelled (superseded before finishing)"
         if stage == "classify":
             return "classify · cancelled (superseded before finishing)"
+        if stage == "frontier":
+            return "Frontier model · cancelled (superseded before finishing)"
+        if stage == "frontier_check":
+            return "Frontier check · cancelled (superseded before finishing)"
         return "Escalated to frontier · cancelled (superseded before finishing)"
 
     # A new "start" for a stage that already has one pending means the prior
@@ -152,7 +160,7 @@ def build_segments(events: list[dict]) -> tuple[list[dict], float]:
                 }
             )
 
-        elif stage in ("classify", "qwen", "escalate"):
+        elif stage in ("classify", "qwen", "escalate", "frontier", "frontier_check"):
             if event == "start":
                 if stage in pending_start:
                     mark_cancelled(stage, pending_start[stage], ts)
@@ -172,7 +180,18 @@ def build_segments(events: list[dict]) -> tuple[list[dict], float]:
                         label = f"{model} · {action.get('name', '?')} · {args.get('type', '?')} · {args.get('color', '?')}"
                     else:
                         label = f"{model} · no action (parse failed)"
-                else:  # escalate
+                elif stage == "frontier":
+                    # Confident ask_question match -- classify() was already
+                    # sure, so there's no confirm/deny outcome to report here,
+                    # unlike frontier_check below.
+                    label = "Frontier model · answered"
+                elif stage == "frontier_check":
+                    # Low confidence, but ask_question was still the closest
+                    # category -- the frontier's own confirm/deny verdict IS
+                    # the interesting part of this segment, distinct from a
+                    # confident "frontier" call.
+                    label = "Frontier check · confirmed question" if e.get("confirmed") else "Frontier check · not a question"
+                else:  # escalate -- old dead-stub stage, only in historical logs
                     label = "Escalated to frontier"
                 segments.append(
                     {
